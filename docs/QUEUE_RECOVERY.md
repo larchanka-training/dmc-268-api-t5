@@ -1,17 +1,17 @@
 ---
 document_id: queue-recovery
-version: "2.4"
+version: "2.3"
 language: ru
 status: design_specification
 implementation_status: not_implemented
-based_on: "2.3"
+based_on: "2.2"
 entrypoint: false
 owns: [execution_protocol, recovery_steps, recovery_tests]
 architecture: ../BACKEND_ARCHITECTURE.md
 schema: DATABASE_SCHEMA.md
 ---
 
-# Очередь и восстановление — приложение к v2.4
+# Очередь и восстановление — приложение к v2.3
 
 **Назначение:** конкретный протокол без нового брокера или универсального движка процессов. Это проект реализации, не отчёт о пройденных тестах. Область — WorkItem, ModelCall, Comment, Payment и WebhookInbox.
 

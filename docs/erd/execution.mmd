@@ -1,111 +1,89 @@
 erDiagram
-    model_call {
-        uuid id PK,FK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        uuid job_id FK "NOT NULL"
-        uuid perspective_run_id FK "NULL"
-        text kind "NOT NULL"
-        text call_key "NOT NULL"
-        text state "NOT NULL"
-        uuid accepted_attempt_id FK "NULL"
+    ReviewJob {
+        uuid id PK
+        uuid tenant_id FK
+        uuid request_id FK
+        uuid merge_request_id FK
+        uuid index_id FK
+        bigint revision_epoch
+        text state
     }
-    context_payload {
-        uuid id PK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        uuid model_call_id FK "NOT NULL"
-        jsonb request_body "NOT NULL"
-        text content_hash "NOT NULL"
-        bigint token_count "NOT NULL"
-        bigint output_reserve "NOT NULL"
-        text counter_version "NOT NULL"
+    PerspectiveRun {
+        uuid id PK
+        uuid tenant_id FK
+        uuid job_id FK
+        uuid perspective_id FK
+        uuid prompt_version_id FK
+        text state
+        jsonb coverage
     }
-    inference_attempt {
-        uuid id PK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        uuid model_call_id FK "NOT NULL"
-        uuid work_item_id FK "NOT NULL"
-        integer attempt_no "NOT NULL"
-        uuid owner_token "NOT NULL"
-        text state "NOT NULL"
-        bigint reserved_tokens "NOT NULL"
-        bigint actual_tokens "NULL"
-        jsonb result "NULL"
+    ModelCall {
+        uuid id PK
+        uuid tenant_id FK
+        uuid job_id FK
+        uuid perspective_run_id FK
+        text kind
+        uuid accepted_attempt_id FK
     }
-    finding {
-        uuid id PK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        uuid job_id FK "NOT NULL"
-        uuid model_call_id FK "NOT NULL"
-        uuid attempt_id FK "NOT NULL"
-        text category "NOT NULL"
-        text severity "NOT NULL"
-        text body "NOT NULL"
-        jsonb evidence "NOT NULL"
-        text fingerprint "NOT NULL"
-        uuid duplicate_of_id FK "NULL"
+    ContextPayload {
+        uuid id PK
+        uuid tenant_id FK
+        uuid model_call_id FK
+        jsonb request_body
+        text content_hash
+        bigint token_count
+        bigint output_reserve
     }
-    comment {
-        uuid id PK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        uuid job_id FK "NOT NULL"
-        uuid finding_id FK "NULL"
-        text publication_key "NOT NULL"
-        jsonb target "NOT NULL"
-        text body "NOT NULL"
-        text state "NOT NULL"
-        text provider_comment_id "NULL"
-        uuid lease_token "NULL"
-        timestamptz locked_until "NULL"
-        timestamptz available_at "NOT NULL"
+    InferenceAttempt {
+        uuid id PK
+        uuid tenant_id FK
+        uuid model_call_id FK
+        uuid work_item_id FK
+        integer attempt_no
+        uuid owner_token
+        text state
     }
-    work_item {
-        uuid id PK "NOT NULL"
-        uuid tenant_id FK "NOT NULL"
-        text kind "NOT NULL"
-        uuid repository_id FK "NULL"
-        uuid merge_request_id FK "NULL"
-        uuid review_request_id FK "NULL"
-        uuid review_job_id FK "NULL"
-        text business_key "NOT NULL"
-        text state "NOT NULL"
-        integer attempt_count "NOT NULL"
-        integer max_attempts "NOT NULL"
-        timestamptz available_at "NOT NULL"
-        uuid lease_token "NULL"
-        timestamptz locked_until "NULL"
-        timestamptz deadline_at "NOT NULL"
-        text last_error_code "NULL"
+    Finding {
+        uuid id PK
+        uuid tenant_id FK
+        uuid job_id FK
+        uuid model_call_id FK
+        uuid attempt_id FK
+        uuid duplicate_of_id FK
     }
-    webhook_inbox {
-        uuid id PK "NOT NULL"
-        text provider_scope "NOT NULL"
-        text delivery_id "NOT NULL"
-        uuid tenant_id FK "NULL"
-        text payload_hash "NOT NULL"
-        jsonb payload "NOT NULL"
-        text state "NOT NULL"
-        timestamptz received_at "NOT NULL"
+    Comment {
+        uuid id PK
+        uuid tenant_id FK
+        uuid job_id FK
+        uuid finding_id FK
+        text publication_key
+        text state
+        text provider_comment_id
     }
-    inference_attempt o|--o{ model_call : "tenant_id,accepted_attempt_id,id"
-    review_job ||--o{ model_call : "tenant_id,job_id"
-    perspective_run o|--o{ model_call : "tenant_id,perspective_run_id,job_id"
-    workspace ||--o{ model_call : "tenant_id"
-    model_call ||--o{ context_payload : "tenant_id,model_call_id"
-    workspace ||--o{ context_payload : "tenant_id"
-    model_call ||--o{ inference_attempt : "tenant_id,model_call_id"
-    workspace ||--o{ inference_attempt : "tenant_id"
-    work_item ||--o{ inference_attempt : "tenant_id,work_item_id"
-    review_job ||--o{ finding : "tenant_id,job_id"
-    finding o|--o{ finding : "tenant_id,job_id,duplicate_of_id"
-    model_call ||--o{ finding : "tenant_id,model_call_id,attempt_id"
-    model_call ||--o{ finding : "tenant_id,model_call_id,job_id"
-    workspace ||--o{ finding : "tenant_id"
-    review_job ||--o{ comment : "tenant_id,job_id"
-    finding o|--o{ comment : "tenant_id,job_id,finding_id"
-    workspace ||--o{ comment : "tenant_id"
-    merge_request o|--o{ work_item : "tenant_id,merge_request_id"
-    repository o|--o{ work_item : "tenant_id,repository_id"
-    review_job o|--o{ work_item : "tenant_id,review_job_id"
-    review_request o|--o{ work_item : "tenant_id,review_request_id"
-    workspace ||--o{ work_item : "tenant_id"
-    workspace o|--o{ webhook_inbox : "tenant_id"
+    WorkItem {
+        uuid id PK
+        uuid tenant_id FK
+        text kind
+        text business_key
+        text state
+        uuid lease_token
+        timestamptz locked_until
+    }
+    WebhookInbox {
+        uuid id PK
+        text provider_scope
+        text delivery_id
+        uuid tenant_id FK
+        text payload_hash
+        jsonb payload
+        text state
+    }
+    ReviewJob ||--o{ PerspectiveRun : "job_id"
+    ReviewJob ||--o{ ModelCall : "job_id"
+    PerspectiveRun o|--o{ ModelCall : "perspective_run_id"
+    ModelCall ||--o| ContextPayload : "model_call_id"
+    ModelCall ||--o{ InferenceAttempt : "model_call_id"
+    WorkItem ||--o{ InferenceAttempt : "work_item_id"
+    InferenceAttempt ||--o{ Finding : "attempt_id"
+    Finding o|--o{ Comment : "finding_id"
+    ReviewJob ||--o{ Comment : "job_id"

@@ -1,0 +1,91 @@
+erDiagram
+    User {
+        uuid id PK
+        text state
+        text display_name
+        timestamptz created_at
+    }
+    ExternalIdentity {
+        uuid id PK
+        uuid user_id FK
+        text provider_host
+        bigint external_user_id
+        text user_grant_ref
+        timestamptz access_checked_at
+    }
+    AuthSession {
+        uuid id PK
+        uuid user_id FK
+        text token_hash
+        timestamptz expires_at
+        timestamptz revoked_at
+    }
+    Workspace {
+        uuid id PK
+        text name
+        text state
+        bigint access_epoch
+    }
+    Membership {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        text role
+        text state
+        bigint access_epoch
+    }
+    WorkspaceInvitation {
+        uuid id PK
+        uuid tenant_id FK
+        uuid invited_by_id FK
+        bigint expected_github_user_id
+        text role
+        text token_hash
+        timestamptz expires_at
+    }
+    ServiceAccount {
+        uuid id PK
+        uuid tenant_id FK
+        text name
+        text state
+        bigint access_epoch
+        uuid authorized_by_id FK
+    }
+    GitIntegration {
+        uuid id PK
+        uuid tenant_id FK
+        text provider_host
+        text app_config_key
+        bigint installation_id
+        text state
+        bigint access_epoch
+    }
+    Repository {
+        uuid id PK
+        uuid tenant_id FK
+        uuid integration_id FK
+        bigint external_id
+        text full_name
+        text state
+        bigint access_epoch
+    }
+    RepositoryGrant {
+        uuid id PK
+        uuid tenant_id FK
+        uuid repository_id FK
+        uuid membership_id FK
+        uuid service_account_id FK
+        text permission
+        text state
+    }
+    User ||--o{ ExternalIdentity : "user_id"
+    User ||--o{ AuthSession : "user_id"
+    User ||--o{ Membership : "user_id"
+    Workspace ||--o{ Membership : "tenant_id"
+    Workspace ||--o{ WorkspaceInvitation : "tenant_id"
+    Workspace ||--o{ ServiceAccount : "tenant_id"
+    Workspace ||--o{ GitIntegration : "tenant_id"
+    GitIntegration ||--o{ Repository : "integration_id"
+    Repository ||--o{ RepositoryGrant : "repository_id"
+    Membership o|--o{ RepositoryGrant : "membership_id"
+    ServiceAccount o|--o{ RepositoryGrant : "service_account_id"
