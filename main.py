@@ -1,13 +1,5 @@
-from fastapi import FastAPI
+"""Compatibility entry point: uvicorn main:app."""
 
-app = FastAPI(title="DMC-268 API", version="0.1.0")
+from code_review.bootstrap import create_app
 
-
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to DMC-268 Team 5 API"}
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+app = create_app()

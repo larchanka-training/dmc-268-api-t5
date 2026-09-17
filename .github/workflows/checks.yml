@@ -1,0 +1,35 @@
+name: Backend checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: code_review
+          POSTGRES_PASSWORD: test_only
+          POSTGRES_DB: code_review_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U code_review -d code_review_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://code_review:test_only@localhost:5432/code_review_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.15"
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pylint src/code_review main.py
+      - run: uv run pytest -q

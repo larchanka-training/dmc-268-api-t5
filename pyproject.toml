@@ -2,7 +2,42 @@
 name = "dmc-268-api-t5"
 version = "0.1.0"
 description = "FastAPI backend for DMC-268 Team 5"
+requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0"
+    "alembic>=1.16,<2",
+    "fastapi>=0.110,<1",
+    "psycopg[binary]>=3.2,<4",
+    "sqlalchemy[asyncio]>=2.0.40,<2.1",
+    "uvicorn>=0.28,<1",
 ]
+
+[dependency-groups]
+dev = ["httpx>=0.28,<1", "pylint>=3.3,<5", "pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.11,<1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_review"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["postgres: requires a disposable PostgreSQL database via TEST_DATABASE_URL"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pylint.main]
+ignore-paths = ["alembic/versions/.*"]
+
+[tool.pylint.messages_control]
+disable = ["missing-module-docstring", "missing-class-docstring", "missing-function-docstring", "too-few-public-methods", "duplicate-code"]
+
+[tool.pylint.format]
+max-line-length = 100
