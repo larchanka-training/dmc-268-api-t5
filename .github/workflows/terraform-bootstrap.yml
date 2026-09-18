@@ -1,0 +1,40 @@
+name: Terraform Deploy to VPS
+
+on:
+  workflow_dispatch: # Ручной запуск по кнопке
+  push:
+    paths:
+      - 'terraform/**'
+    branches: [ main ]
+
+jobs:
+  terraform-apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Terraform Init & Validate
+        run: |
+          cd terraform
+          terraform init
+          terraform validate
+
+      - name: Terraform Apply (Подъем базового контейнера)
+        run: |
+          cd terraform
+          terraform apply -auto-approve \
+            -var="vps_host=${{ secrets.VPS_DMC268_IP_T5 }}" \
+            -var="vps_user=${{ secrets.VPS_DMC268_U }}" \
+            -var="vps_password=${{ secrets.VPS_DMC268_P }}"
+
+      - name: Check Health from Runner
+        run: |
+          echo "Проверка доступности поднятого контейнера по HTTP..."
+          sleep 3
+          curl -sI http://${{ secrets.VPS_DMC268_IP_T5 }} | grep "HTTP/"
