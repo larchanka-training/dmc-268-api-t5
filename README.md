@@ -13,12 +13,12 @@ uvicorn main:app --reload
 
 ## Документация backend
 
-- [Архитектура](BACKEND_ARCHITECTURE.md)
-- [Схема PostgreSQL и словарь 34 сущностей](docs/DATABASE_SCHEMA.md)
-- [Очередь и восстановление](docs/QUEUE_RECOVERY.md)
-- [Исходники ER-диаграмм Mermaid](docs/erd/README.md)
+- [Архитектура backend по arc42](ARCHITECTURE.md)
+- [ER-диаграмма PostgreSQL](docs/diagrams/erd.mmd)
+- [Пример Nginx / API Gateway](deploy/nginx.conf)
 
-Документы версии 2.3 описывают проект, а не готовую реализацию.
-Этот PR включает только документацию. SQLAlchemy-модели, миграции Alembic
-и тесты остаются отдельной работой по
-[задаче №6](https://github.com/larchanka-training/dmc-268-api-t6/issues/6).
+Архитектура описывает RabbitMQ → bridge → BullMQ/Redis → workers,
+правила ревью, авторизацию, токенный бюджет, развёртывание и сценарии сбоев.
+Структура проекта и команды Compose/Kubernetes в документе — план реализации.
+SQLAlchemy-модели, миграции Alembic и исполняемые тесты добавляются отдельно
+в рамках [задачи №5](https://github.com/larchanka-training/dmc-268-api-t5/issues/5).
