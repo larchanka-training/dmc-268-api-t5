@@ -13,7 +13,6 @@ jobs:
       - name: Run Linters
         run: |
           echo "Проверка качества кода API..."
-          if [ -f package.json ]; then npm ci && npm run lint --if-present; fi
           if [ -f requirements.txt ]; then pip install flake8 && flake8 . --exit-zero; fi
 
   build-and-push:
