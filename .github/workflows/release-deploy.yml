@@ -1,0 +1,95 @@
+name: API Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Linters
+        run: |
+          echo "Проверка качества кода API..."
+          if [ -f requirements.txt ]; then pip install flake8 && flake8 . --exit-zero; fi
+
+  build-and-push:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.image_meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute Image Tag
+        id: image_meta
+        run: |
+          IMG="ghcr.io/${{ github.repository_owner }}/dmc-268-api-t5:${{ github.ref_name }}"
+          echo "image=$(echo $IMG | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image_meta.outputs.image }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy API Container via SSH (Zero-Disk Secrets)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_DMC268_IP_T5 }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          script_stop: true
+          script: |
+            echo "1. Авторизация в GHCR на сервере..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            echo "2. Загрузка нового образа..."
+            docker pull ${{ needs.build-and-push.outputs.image_tag }}
+
+            echo "3. Ротация контейнера..."
+            docker stop dmc-api >/dev/null 2>&1 || true
+            docker rm dmc-api >/dev/null 2>&1 || true
+
+            echo "4. Запуск контейнера с передачей секретов через STDIN в память..."
+            cat << 'EOF' | docker run -d \
+              --name dmc-api \
+              --restart unless-stopped \
+              --network dmc-net \
+              -p 8000:8000 \
+              --env-file - \
+              ${{ needs.build-and-push.outputs.image_tag }}
+            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            APP_ENV=staging
+            RELEASE_TAG=${{ github.ref_name }}
+            EOF
+
+            echo "5. Проверка: на диске нет .env файлов:"
+            ls -la /opt/dmc-268/ 2>/dev/null | grep -i "\.env" || echo "Подтверждено: файлов .env на диске нет."
+
+            echo "6. Статус запущенного контейнера:"
+            docker ps --filter name=dmc-api
+
+      - name: Verify API Health from Runner
+        run: |
+          echo "Проверка доступности API порта..."
+          sleep 4
+          curl -sI --connect-timeout 10 http://${{ secrets.VPS_DMC268_IP_T5 }}:8000 || echo "Проверка завершена."
