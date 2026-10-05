@@ -1,0 +1,147 @@
+erDiagram
+    Organization ||--o{ GitHubInstallation : owns
+    Organization ||--o| Subscription : subscribes
+    Subscription ||--o{ TokenBudget : allocates
+    TokenBudget ||--o{ TokenReservation : reserves
+    ReviewJob o|--o{ TokenReservation : review_budget
+    RepositorySnapshot o|--o{ TokenReservation : index_budget
+    TokenReservation ||--o{ TokenUsage : accounts
+    GitHubInstallation ||--o{ Repository : enables
+    Repository ||--o{ MergeRequest : contains
+    MergeRequest ||--o{ ReviewJob : reviewed_by
+    ReviewJob ||--o{ ContextPayload : uses
+    ReviewJob ||--o{ Finding : produces
+    ContextPayload o|--o{ Finding : supports
+    ReviewJob ||--o{ Publication : publishes
+    Publication ||--o{ Comment : contains
+    Finding ||--o| Comment : delivered_as
+    Repository ||--o{ RepositorySnapshot : indexed_as
+    RepositorySnapshot ||--o{ CodeChunk : contains
+    RepositorySnapshot ||--o{ CodeEdge : contains
+    CodeChunk ||--o{ CodeEdge : source
+    CodeChunk o|--o{ CodeEdge : resolved_target
+    Organization ||--o{ WebhookReceipt : receives
+    Organization ||--o{ OutboxEvent : dispatches
+
+    Organization {
+        uuid id PK
+        string identity_subject UK
+    }
+    Subscription {
+        uuid id PK
+        uuid organization_id FK
+        string status
+        datetime valid_until
+    }
+    TokenBudget {
+        uuid id PK
+        uuid organization_id FK
+        uuid subscription_id FK
+        bigint allowance_tokens
+        bigint consumed_tokens
+        bigint reserved_tokens
+    }
+    TokenReservation {
+        uuid id PK
+        uuid organization_id FK
+        uuid budget_id FK
+        uuid review_job_id FK
+        uuid snapshot_id FK
+        bigint remaining_tokens
+        bigint inflight_tokens
+        string status
+    }
+    TokenUsage {
+        uuid id PK
+        uuid organization_id FK
+        uuid reservation_id FK
+        string request_key
+        bigint upper_bound_tokens
+        bigint actual_tokens
+        string status
+    }
+    GitHubInstallation {
+        uuid id PK
+        uuid organization_id FK
+        bigint installation_id UK
+    }
+    Repository {
+        uuid id PK
+        uuid organization_id FK
+        uuid installation_id FK
+        bigint github_repository_id
+    }
+    MergeRequest {
+        uuid id PK
+        uuid organization_id FK
+        uuid repository_id FK
+        bigint number
+    }
+    ReviewJob {
+        uuid id PK
+        uuid organization_id FK
+        uuid merge_request_id FK
+        string head_sha
+        string base_sha
+        string status
+    }
+    ContextPayload {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        jsonb payload
+    }
+    Finding {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        uuid context_payload_id FK
+        string fingerprint
+    }
+    Publication {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        bigint github_review_id
+        string status
+    }
+    Comment {
+        uuid id PK
+        uuid organization_id FK
+        uuid publication_id FK
+        uuid finding_id FK
+        bigint github_comment_id
+    }
+    RepositorySnapshot {
+        uuid id PK
+        uuid organization_id FK
+        uuid repository_id FK
+        string commit_sha
+        string profile_hash
+    }
+    CodeChunk {
+        uuid id PK
+        uuid organization_id FK
+        uuid snapshot_id FK
+        string path
+        text content
+        vector embedding
+    }
+    CodeEdge {
+        uuid id PK
+        uuid organization_id FK
+        uuid snapshot_id FK
+        uuid source_chunk_id FK
+        uuid target_chunk_id FK
+    }
+    WebhookReceipt {
+        uuid id PK
+        uuid organization_id FK
+        string delivery_id UK
+    }
+    OutboxEvent {
+        uuid id PK
+        uuid organization_id FK
+        string event_type
+        uuid aggregate_id
+    }
