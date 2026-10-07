@@ -6,17 +6,11 @@ on:
       - 'v*.*.*'
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Linters
-        run: |
-          echo "Проверка качества кода API..."
-          if [ -f requirements.txt ]; then pip install flake8 && flake8 . --exit-zero; fi
+  checks:
+    uses: ./.github/workflows/ci.yml
 
   build-and-push:
-    needs: lint
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,7 +47,7 @@ jobs:
       - name: Deploy API Container via SSH (Zero-Disk Secrets)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.VPS_DMC268_IP_T5 }}
+          host: ${{ vars.VPS_DMC268_IP_T5 }}
           username: ${{ secrets.VPS_DMC268_U }}
           password: ${{ secrets.VPS_DMC268_P }}
           script_stop: true
@@ -64,9 +58,28 @@ jobs:
             echo "2. Загрузка нового образа..."
             docker pull ${{ needs.build-and-push.outputs.image_tag }}
 
-            echo "3. Ротация контейнера..."
-            docker stop dmc-api >/dev/null 2>&1 || true
-            docker rm dmc-api >/dev/null 2>&1 || true
+            rollback() {
+              echo "ОШИБКА: новая версия не запустилась, выполняю откат..."
+              docker logs --tail 50 dmc-api 2>&1 || true
+              docker rm -f dmc-api >/dev/null 2>&1 || true
+              if [ "$HAS_PREV" = "1" ]; then
+                docker rename dmc-api-prev dmc-api
+                docker start dmc-api
+                echo "Откат выполнен: запущена предыдущая версия."
+              else
+                echo "Предыдущей версии нет, откатываться некуда."
+              fi
+              exit 1
+            }
+
+            echo "3. Ротация контейнера (старый сохраняется для отката)..."
+            docker rm -f dmc-api-prev >/dev/null 2>&1 || true
+            HAS_PREV=0
+            if docker inspect dmc-api >/dev/null 2>&1; then
+              docker stop dmc-api
+              docker rename dmc-api dmc-api-prev
+              HAS_PREV=1
+            fi
 
             echo "4. Запуск контейнера с передачей секретов через STDIN в память..."
             cat << 'EOF' | docker run -d \
@@ -75,7 +88,7 @@ jobs:
               --network dmc-net \
               -p 8000:8000 \
               --env-file - \
-              ${{ needs.build-and-push.outputs.image_tag }}
+              ${{ needs.build-and-push.outputs.image_tag }} || rollback
             LLM_API_KEY=${{ secrets.LLM_API_KEY }}
             DB_PASSWORD=${{ secrets.DB_PASSWORD }}
             APP_ENV=staging
@@ -85,11 +98,23 @@ jobs:
             echo "5. Проверка: на диске нет .env файлов:"
             ls -la /opt/dmc-268/ 2>/dev/null | grep -i "\.env" || echo "Подтверждено: файлов .env на диске нет."
 
-            echo "6. Статус запущенного контейнера:"
+            echo "6. Проверка /healthcheck на сервере (до 30 секунд)..."
+            HEALTHY=0
+            for i in $(seq 1 30); do
+              if curl -fsS http://localhost:8000/healthcheck >/dev/null 2>&1; then
+                HEALTHY=1
+                break
+              fi
+              sleep 1
+            done
+            [ "$HEALTHY" = "1" ] || rollback
+
+            echo "7. Новая версия здорова, удаляю резервный контейнер."
+            docker rm -f dmc-api-prev >/dev/null 2>&1 || true
             docker ps --filter name=dmc-api
 
       - name: Verify API Health from Runner
         run: |
-          echo "Проверка доступности API порта..."
-          sleep 4
-          curl -sI --connect-timeout 10 http://${{ secrets.VPS_DMC268_IP_T5 }}:8000 || echo "Проверка завершена."
+          echo "Проверка доступности API с раннера..."
+          curl -fsS --connect-timeout 10 --retry 5 --retry-delay 3 --retry-all-errors \
+            http://${{ vars.VPS_DMC268_IP_T5 }}:8000/healthcheck

@@ -6,3 +6,7 @@ env/
 venv/
 .env
 .pytest_cache/
+.npm-cache/
+.mypy_cache/
+.ruff_cache/
+.venv-tools/
