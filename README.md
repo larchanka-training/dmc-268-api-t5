@@ -9,10 +9,10 @@ docker compose up --build
 curl http://localhost:8000/healthcheck   # {"status":"ok"}
 ```
 
-Compose starts the API, PostgreSQL 16 and Redis 7. Optional overrides
+Compose starts the API, PostgreSQL 17 and Redis 7. Optional overrides
 (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) go into a local `.env`.
 
-## Local development (Poetry, Python 3.13)
+## Local development (Poetry, Python 3.14)
 
 ```bash
 poetry install

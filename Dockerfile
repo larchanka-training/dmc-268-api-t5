@@ -1,4 +1,4 @@
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV POETRY_VIRTUALENVS_IN_PROJECT=true \
     POETRY_NO_INTERACTION=1 \
@@ -11,7 +11,7 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root
 
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
