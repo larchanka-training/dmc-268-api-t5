@@ -20,7 +20,7 @@
 
 | Название секрета | Назначение |
 | :--- | :--- |
-| `VPS_DMC268_IP_T5` | IP-адрес сервера Hetzner |
+| `VPS_DMC268_IP_T5` (Variable, не Secret) | IP-адрес сервера Hetzner |
 | `VPS_DMC268_U` | SSH-пользователь |
 | `VPS_DMC268_P` | Пароль пользователя SSH |
 | `LLM_API_KEY` | Токен/ключ для работы с LLM |
