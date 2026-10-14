@@ -36,6 +36,14 @@ resource "null_resource" "vps_bootstrap" {
       "mkdir -p /opt/dmc-268/nginx",
       "chmod 755 /opt/dmc-268",
 
+      "echo '=== [Terraform] Redis (общий для staging/prod, БД 0 и 1, наружу не публикуется) ==='",
+      "docker volume inspect dmc-redisdata >/dev/null 2>&1 || docker volume create dmc-redisdata",
+      "docker inspect dmc-redis >/dev/null 2>&1 || docker run -d --name dmc-redis --restart unless-stopped --network dmc-net -v dmc-redisdata:/data --health-cmd 'redis-cli ping' --health-interval 5s redis:7-alpine redis-server --appendonly yes",
+      "docker start dmc-redis >/dev/null 2>&1 || true",
+
+      "echo '=== [Terraform] Volume для Postgres (контейнер создает deploy, пароль не пишется на диск) ==='",
+      "docker volume inspect dmc-pgdata >/dev/null 2>&1 || docker volume create dmc-pgdata",
+
       "echo '=== [Terraform] Подъем базового docker-контейнера (DoD) ==='",
       "# Запуск базового reverse-proxy контейнера",
       "docker network inspect dmc-net >/dev/null 2>&1 || docker network create dmc-net",

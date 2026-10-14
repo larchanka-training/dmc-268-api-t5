@@ -10,6 +10,8 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     release_tag: str = "dev"
+    redis_url: str = "redis://localhost:6379/0"
+    database_url: str = ""
 
 
 @lru_cache

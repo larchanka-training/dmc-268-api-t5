@@ -37,14 +37,16 @@
 
 ---
 
-## 4. Как выпустить релиз API
+## 4. Окружения и автодеплой
 
-Деплой запускается строго по тегу версии:
+Один VPS, два окружения. Деплой запускается автоматически при пуше (после прохождения CI):
 
-```bash
-git checkout main
-git pull origin main
+| Ветка | Environment | Контейнеры | Порт API | БД Postgres | Redis DB |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `main` | `production` | `dmc-api-prod`, `dmc-worker-prod` | 8000 | `dmc_prod` | 0 |
+| `develop` | `staging` | `dmc-api-staging`, `dmc-worker-staging` | 8100 | `dmc_staging` | 1 |
 
-# Создание и отправка тега
-git tag v1.0.0
-git push origin v1.0.0
+- Общие контейнеры `dmc-postgres` (создается деплоем, пароль `DB_PASSWORD` через STDIN) и `dmc-redis` (создает Terraform). Порты наружу не публикуются, доступны только в сети `dmc-net`.
+- Worker (ARQ) запускается из того же образа командой `arq app.worker.WorkerSettings`.
+- Тег образа: SHA коммита. При падении healthcheck выполняется автоматический откат на предыдущие контейнеры.
+- Секреты можно задать отдельно на каждый Environment (**Settings -> Environments**), иначе используются репозиторные.
