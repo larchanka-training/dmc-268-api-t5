@@ -75,7 +75,7 @@ jobs:
 
             command -v docker >/dev/null || { echo "ОШИБКА: docker не установлен. Сначала запустите workflow Terraform Deploy to VPS."; exit 1; }
             [ -n "${{ secrets.DB_PASSWORD }}" ] || { echo "ОШИБКА: секрет DB_PASSWORD пуст (проверьте secrets репозитория/Environment)."; exit 1; }
-            [ -n "${{ secrets.LLM_API_KEY }}" ] || echo "ВНИМАНИЕ: секрет LLM_API_KEY пуст."
+            [ -n "${{ secrets.AI_DMC268_T5 }}" ] || echo "ВНИМАНИЕ: секрет AI_DMC268_T5 пуст."
 
             echo "1. Авторизация в GHCR и загрузка образа..."
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -127,7 +127,7 @@ jobs:
               cat << EOF
             APP_ENV=${{ needs.build-and-push.outputs.environment }}
             RELEASE_TAG=${{ github.sha }}
-            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            LLM_API_KEY=${{ secrets.AI_DMC268_T5 }}
             DATABASE_URL=postgresql://postgres:${{ secrets.DB_PASSWORD }}@dmc-postgres:5432/${DB_NAME}
             REDIS_URL=redis://dmc-redis:6379/${REDIS_DB}
             EOF
