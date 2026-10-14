@@ -32,6 +32,13 @@ poetry run pytest
 The same checks run in GitHub Actions (`.github/workflows/ci.yml`) on every
 push to `main` and every pull request, and before each release.
 
+## Branch naming
+
+Branches must be named `<type>/<short-name>` (lowercase latin letters, digits, `-` or `_`), where `<type>` is one of
+`feat` (or its alias `feature`), `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `hotfix`
+(e.g. `feat/add-healthcheck`, `fix/12-db-timeout`). The name is checked in
+GitHub Actions (`.github/workflows/branch-name.yml`) on every pull request.
+
 ## Deploy
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Releases are triggered by a
