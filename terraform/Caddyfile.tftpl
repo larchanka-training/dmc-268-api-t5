@@ -1,0 +1,23 @@
+# Генерируется Terraform (terraform/Caddyfile.tftpl). TLS-сертификаты Caddy получает сам.
+# /api/* уходит в API без префикса, остальное - в UI (SPA).
+# Апстримы резолвятся при запросе: пока сервис не задеплоен, Caddy отвечает 502.
+
+${domain} {
+	encode gzip
+	handle_path /api/* {
+		reverse_proxy dmc-api-prod:8000
+	}
+	handle {
+		reverse_proxy dmc-ui-prod:80
+	}
+}
+
+staging.${domain} {
+	encode gzip
+	handle_path /api/* {
+		reverse_proxy dmc-api-staging:8000
+	}
+	handle {
+		reverse_proxy dmc-ui-staging:80
+	}
+}

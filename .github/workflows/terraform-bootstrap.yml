@@ -26,6 +26,8 @@ jobs:
           terraform validate
 
       - name: Terraform Apply (Подъем базового контейнера)
+        env:
+          TF_VAR_app_domain: ${{ vars.APP_DOMAIN }}
         run: |
           cd terraform
           terraform apply -auto-approve \
@@ -33,8 +35,13 @@ jobs:
             -var="vps_user=${{ secrets.VPS_DMC268_U }}" \
             -var="vps_password=${{ secrets.VPS_DMC268_P }}"
 
-      - name: Check Health from Runner
+      - name: Check Caddy from Runner
+        env:
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          VPS_IP: ${{ vars.VPS_DMC268_IP_T5 }}
         run: |
-          echo "Проверка доступности поднятого контейнера по HTTP..."
-          sleep 3
-          curl -sI http://${{ vars.VPS_DMC268_IP_T5 }} | grep "HTTP/"
+          DOMAIN="${APP_DOMAIN:-$(echo "$VPS_IP" | tr . -).sslip.io}"
+          echo "Проверка Caddy: http://${DOMAIN} должен отвечать редиректом на HTTPS..."
+          curl -sI --retry 5 --retry-delay 3 --retry-all-errors "http://${DOMAIN}" | grep "HTTP/"
+          echo "Production: https://${DOMAIN}"
+          echo "Staging:    https://staging.${DOMAIN}"
