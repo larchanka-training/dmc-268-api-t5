@@ -3,6 +3,7 @@ name: Branch name
 on:
   pull_request:
     types: [opened, reopened, synchronize, edited]
+  workflow_call:
 
 jobs:
   check-branch-name:
@@ -10,8 +11,12 @@ jobs:
     steps:
       - name: Validate branch name
         env:
-          BRANCH: ${{ github.head_ref }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
+          if [[ "$BRANCH" == "main" || "$BRANCH" == "develop" ]]; then
+            echo "Long-lived branch '$BRANCH', skipping."
+            exit 0
+          fi
           pattern='^(feat|feature|fix|docs|refactor|test|chore|ci|hotfix)/[a-z0-9]+([-_][a-z0-9]+)*$'
           if [[ ! "$BRANCH" =~ $pattern ]]; then
             echo "::error::Branch name '$BRANCH' is invalid."
