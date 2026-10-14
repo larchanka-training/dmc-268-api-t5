@@ -73,9 +73,9 @@ Let's Encrypt ограничивает число сертификатов на 
 | Ветка | Environment | Swarm-сервисы | Адрес API | БД Postgres | Redis DB |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `main` | `production` | `dmc-api-prod`, `dmc-worker-prod` | `https://<домен>/api/` | `dmc_prod` | 0 |
-| `develop`, `feature/**` | `staging` | `dmc-api-staging`, `dmc-worker-staging` | `https://staging.<домен>/api/` | `dmc_staging` | 1 |
+| `develop` | `staging` | `dmc-api-staging`, `dmc-worker-staging` | `https://staging.<домен>/api/` | `dmc_staging` | 1 |
 
-Feature-ветки деплоятся в тот же staging: последний пуш перезаписывает предыдущий.
+Пуш в feature-ветки не деплоит. Любую ветку можно задеплоить вручную: **Actions -> API Release Pipeline -> Run workflow**, выбрать ветку и окружение (`staging` или `production`). Деплой перезаписывает текущую версию окружения. Чтобы в production нельзя было выкатить произвольную ветку, ограничьте ее в **Settings -> Environments -> production** (Deployment branches и/или Required reviewers).
 
 - Общие `dmc-postgres` (swarm-сервис, создается деплоем, volume `dmc-pgdata`) и `dmc-redis` (контейнер из Terraform). Порты наружу не публикуются, доступны только в сети `dmc-overlay`.
 - Первый деплой после перехода на swarm удаляет старые standalone-контейнеры `dmc-postgres`, `dmc-api-*`, `dmc-worker-*` и создает сервисы. Данные Postgres сохраняются в volume. API недоступен несколько секунд.

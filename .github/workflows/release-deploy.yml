@@ -2,10 +2,19 @@ name: API Release Pipeline
 
 on:
   push:
-    branches: [ main, develop, 'feature/**' ]
+    branches: [ main, develop ]
+  # Ручной деплой любой ветки: ветка выбирается в "Use workflow from", окружение - во входе
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [ staging, production ]
+        default: staging
 
 concurrency:
-  group: deploy-${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+  # На push inputs.environment пустой: окружение определяется веткой
+  group: deploy-${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
   cancel-in-progress: false
 
 jobs:
@@ -35,10 +44,11 @@ jobs:
         env:
           APP_DOMAIN: ${{ vars.APP_DOMAIN }}
           VPS_IP: ${{ vars.VPS_DMC268_IP_T5 }}
+          TARGET: ${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
         run: |
           IMG="ghcr.io/${{ github.repository_owner }}/dmc-268-api-t5:${{ github.sha }}"
           echo "image=$(echo $IMG | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-          if [ "${{ github.ref_name }}" = "main" ]; then
+          if [ "$TARGET" = "production" ]; then
             ENVIRONMENT=production; SUFFIX=prod; HOST_PREFIX=""; REDIS_DB=0
           else
             ENVIRONMENT=staging; SUFFIX=staging; HOST_PREFIX="staging."; REDIS_DB=1

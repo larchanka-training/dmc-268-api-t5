@@ -30,7 +30,7 @@ poetry run pytest
 ```
 
 The same checks run in GitHub Actions (`.github/workflows/ci.yml`) on every
-pull request and before each deploy (push to `main`, `develop` or `feature/**`).
+pull request and before each deploy (push to `main` or `develop`, or a manual run).
 
 ## Branch naming
 
@@ -46,7 +46,8 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Caddy (set up by Terraform) serves
 `https://<domain>/api/*` (production) and `https://staging.<domain>/api/*`
 (staging); without `APP_DOMAIN` the domain is `<ip-with-dashes>.sslip.io`.
 A push to `main` deploys to
-production, a push to `develop` or `feature/**` deploys to staging (after CI and the branch
-name check). API, worker and Postgres run as Docker Swarm services; secrets are
+production, a push to `develop` deploys to staging (after CI and the branch
+name check). Any branch can be deployed manually: Actions -> API Release Pipeline ->
+Run workflow, pick the branch and the environment (`staging` or `production`). API, worker and Postgres run as Docker Swarm services; secrets are
 mounted as files in `/run/secrets`. A failed health check after deploy rolls back to the previous
 version automatically.
