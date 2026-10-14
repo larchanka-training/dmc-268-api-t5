@@ -73,6 +73,10 @@ jobs:
             API="dmc-api-${SFX}"
             WORKER="dmc-worker-${SFX}"
 
+            command -v docker >/dev/null || { echo "ОШИБКА: docker не установлен. Сначала запустите workflow Terraform Deploy to VPS."; exit 1; }
+            [ -n "${{ secrets.DB_PASSWORD }}" ] || { echo "ОШИБКА: секрет DB_PASSWORD пуст (проверьте secrets репозитория/Environment)."; exit 1; }
+            [ -n "${{ secrets.LLM_API_KEY }}" ] || echo "ВНИМАНИЕ: секрет LLM_API_KEY пуст."
+
             echo "1. Авторизация в GHCR и загрузка образа..."
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker pull "$IMAGE"
