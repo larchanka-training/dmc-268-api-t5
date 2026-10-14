@@ -89,7 +89,7 @@ jobs:
                 --name dmc-postgres --restart unless-stopped --network dmc-net \
                 -v dmc-pgdata:/var/lib/postgresql/data \
                 --health-cmd "pg_isready -U postgres" --health-interval 5s \
-                --env-file - postgres:17-alpine
+                --env-file /dev/stdin postgres:17-alpine
             fi
             docker start dmc-postgres >/dev/null 2>&1 || true
             for i in $(seq 1 30); do
@@ -135,11 +135,11 @@ jobs:
 
             echo "4. Запуск API (секреты через STDIN)..."
             ENV_STREAM | sed 's/^ *//' | docker run -d --name "$API" --restart unless-stopped \
-              --network dmc-net -p "${PORT}:8000" --env-file - "$IMAGE" || rollback
+              --network dmc-net -p "${PORT}:8000" --env-file /dev/stdin "$IMAGE" || rollback
 
             echo "5. Запуск worker (ARQ)..."
             ENV_STREAM | sed 's/^ *//' | docker run -d --name "$WORKER" --restart unless-stopped \
-              --network dmc-net --no-healthcheck --env-file - "$IMAGE" \
+              --network dmc-net --no-healthcheck --env-file /dev/stdin "$IMAGE" \
               arq app.worker.WorkerSettings || rollback
 
             echo "6. Проверка /healthcheck (до 30 секунд)..."
