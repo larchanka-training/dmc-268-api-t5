@@ -6,3 +6,5 @@ env/
 venv/
 .env
 .pytest_cache/
+.npm-cache
+.claude
