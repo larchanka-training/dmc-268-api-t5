@@ -78,8 +78,9 @@ jobs:
           username: ${{ secrets.VPS_DMC268_U }}
           password: ${{ secrets.VPS_DMC268_P }}
           envs: DB_PASSWORD,LLM_API_KEY,GHCR_TOKEN
-          script_stop: true
+          # Не script_stop: он вставляет проверку $? после каждой строки и ломает if/else
           script: |
+            set -e
             IMAGE="${{ needs.build-and-push.outputs.image }}"
             APP_ENV="${{ needs.build-and-push.outputs.environment }}"
             SFX="${{ needs.build-and-push.outputs.suffix }}"
@@ -255,8 +256,8 @@ jobs:
           host: ${{ vars.VPS_DMC268_IP_T5 }}
           username: ${{ secrets.VPS_DMC268_U }}
           password: ${{ secrets.VPS_DMC268_P }}
-          script_stop: true
           script: |
+            set -e
             SFX="${{ needs.build-and-push.outputs.suffix }}"
             # Секреты, которые использует сервис, docker удалить не даст - они остаются
             for S in $(docker secret ls --format '{{.Name}}' | grep -E "^(dmc-database-url-${SFX}-|dmc-llm-api-key-${SFX}-|dmc-pg-password-)"); do
