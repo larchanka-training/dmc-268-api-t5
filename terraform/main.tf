@@ -25,6 +25,9 @@ resource "null_resource" "vps_bootstrap" {
 
   provisioner "remote-exec" {
     inline = [
+      "set -e",
+      "echo '=== [Terraform] Ожидание освобождения apt/dpkg (свежий VPS ставит обновления) ==='",
+      "for i in $(seq 1 120); do pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null || break; sleep 5; done",
       "echo '=== [Terraform] Проверка и установка базового окружения ==='",
       "if ! command -v docker > /dev/null 2>&1; then",
       "  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh",
