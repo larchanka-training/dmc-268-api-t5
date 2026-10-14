@@ -12,3 +12,5 @@ async def ping(ctx: dict[str, Any]) -> str:
 class WorkerSettings:
     functions = [ping]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    # Short interval so the health-check key expires soon after the worker dies.
+    health_check_interval = 10

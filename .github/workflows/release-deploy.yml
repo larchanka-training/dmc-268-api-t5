@@ -25,21 +25,27 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       environment: ${{ steps.meta.outputs.environment }}
       suffix: ${{ steps.meta.outputs.suffix }}
-      api_port: ${{ steps.meta.outputs.api_port }}
+      url: ${{ steps.meta.outputs.url }}
       redis_db: ${{ steps.meta.outputs.redis_db }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Compute image tag and target environment
         id: meta
+        env:
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          VPS_IP: ${{ vars.VPS_DMC268_IP_T5 }}
         run: |
           IMG="ghcr.io/${{ github.repository_owner }}/dmc-268-api-t5:${{ github.sha }}"
           echo "image=$(echo $IMG | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           if [ "${{ github.ref_name }}" = "main" ]; then
-            { echo "environment=production"; echo "suffix=prod"; echo "api_port=8000"; echo "redis_db=0"; } >> $GITHUB_OUTPUT
+            ENVIRONMENT=production; SUFFIX=prod; HOST_PREFIX=""; REDIS_DB=0
           else
-            { echo "environment=staging"; echo "suffix=staging"; echo "api_port=8100"; echo "redis_db=1"; } >> $GITHUB_OUTPUT
+            ENVIRONMENT=staging; SUFFIX=staging; HOST_PREFIX="staging."; REDIS_DB=1
           fi
+          # Тот же домен, что в terraform/main.tf: APP_DOMAIN или <ip-через-дефисы>.sslip.io
+          DOMAIN="${APP_DOMAIN:-$(echo "$VPS_IP" | tr . -).sslip.io}"
+          { echo "environment=$ENVIRONMENT"; echo "suffix=$SUFFIX"; echo "redis_db=$REDIS_DB"; echo "url=https://${HOST_PREFIX}${DOMAIN}"; } >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -60,7 +66,190 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ needs.build-and-push.outputs.environment }}
     steps:
-      - name: Deploy Postgres, API and worker via SSH (zero-disk secrets)
+      - name: Deploy Postgres, API and worker as swarm services (secrets via swarm)
+        id: deploy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          LLM_API_KEY: ${{ secrets.AI_DMC268_T5 }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ vars.VPS_DMC268_IP_T5 }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          envs: DB_PASSWORD,LLM_API_KEY,GHCR_TOKEN
+          script_stop: true
+          script: |
+            IMAGE="${{ needs.build-and-push.outputs.image }}"
+            APP_ENV="${{ needs.build-and-push.outputs.environment }}"
+            SFX="${{ needs.build-and-push.outputs.suffix }}"
+            REDIS_DB="${{ needs.build-and-push.outputs.redis_db }}"
+            RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+            DB_NAME="dmc_${SFX}"
+            API="dmc-api-${SFX}"
+            WORKER="dmc-worker-${SFX}"
+
+            command -v docker >/dev/null || { echo "ОШИБКА: docker не установлен. Сначала запустите workflow Terraform Deploy to VPS."; exit 1; }
+            [ -n "$DB_PASSWORD" ] || { echo "ОШИБКА: секрет DB_PASSWORD пуст (проверьте secrets репозитория/Environment)."; exit 1; }
+            [ -n "$LLM_API_KEY" ] || echo "ВНИМАНИЕ: секрет AI_DMC268_T5 пуст."
+
+            echo "1. Загрузка образа из GHCR (учетные данные удаляются сразу после pull)..."
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull "$IMAGE"
+            docker logout ghcr.io >/dev/null
+
+            echo "2. Swarm (один узел, только 127.0.0.1) и overlay-сеть..."
+            if [ "$(docker info --format '{{.Swarm.LocalNodeState}}')" != "active" ]; then
+              docker swarm init --advertise-addr 127.0.0.1 --listen-addr 127.0.0.1:2377
+            fi
+            docker network inspect dmc-overlay >/dev/null 2>&1 || docker network create -d overlay --attachable dmc-overlay
+            docker inspect dmc-redis >/dev/null 2>&1 || { echo "ОШИБКА: нет контейнера dmc-redis. Сначала запустите workflow Terraform Deploy to VPS."; exit 1; }
+            docker network connect dmc-overlay dmc-redis >/dev/null 2>&1 || true
+
+            echo "3. Postgres (swarm-сервис, пароль из swarm secret)..."
+            if docker inspect --type container dmc-postgres >/dev/null 2>&1; then
+              echo "Миграция: удаляю standalone-контейнер dmc-postgres (данные остаются в volume dmc-pgdata)."
+              docker rm -f dmc-postgres
+            fi
+            docker volume inspect dmc-pgdata >/dev/null 2>&1 || docker volume create dmc-pgdata
+            if ! docker service inspect dmc-postgres >/dev/null 2>&1; then
+              PG_SECRET="dmc-pg-password-${RUN_ID}"
+              printf '%s' "$DB_PASSWORD" | docker secret create "$PG_SECRET" - >/dev/null
+              # Параллельный деплой второго окружения мог создать сервис раньше нас
+              docker service create --detach --name dmc-postgres --network dmc-overlay \
+                --mount type=volume,source=dmc-pgdata,target=/var/lib/postgresql/data \
+                --secret source="$PG_SECRET",target=postgres_password \
+                --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
+                --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 5s \
+                postgres:17-alpine >/dev/null || docker service inspect dmc-postgres >/dev/null
+            fi
+            # TCP-проверка: при первом старте временный сервер initdb слушает только сокет
+            PG_READY=0
+            for i in $(seq 1 90); do
+              PG_CID=$(docker ps -q --filter label=com.docker.swarm.service.name=dmc-postgres | head -n 1)
+              if [ -n "$PG_CID" ] && docker exec "$PG_CID" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then PG_READY=1; break; fi
+              sleep 1
+            done
+            [ "$PG_READY" = "1" ] || { echo "ОШИБКА: Postgres не стал доступен"; docker service logs --tail 30 dmc-postgres; exit 1; }
+
+            echo "3a. Роль и БД окружения (${DB_NAME}): владелец БД - отдельная роль, чужие роли подключиться не могут..."
+            # Суперпользователь используется только через локальный сокет внутри контейнера.
+            # Пароль идет в psql через stdin (\set), не в аргументах процесса; :'pw' экранирует его в SQL.
+            PW_ESC=$(printf '%s' "$DB_PASSWORD" | sed -e 's/\\/\\\\/g' -e "s/'/''/g")
+            {
+              printf "\\set pw '%s'\n" "$PW_ESC"
+              printf '%s\n' \
+                "SELECT format('CREATE ROLE %I LOGIN', '${DB_NAME}') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_NAME}')\\gexec" \
+                "ALTER ROLE ${DB_NAME} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'pw';" \
+                "SELECT format('CREATE DATABASE %I OWNER %I', '${DB_NAME}', '${DB_NAME}') WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}')\\gexec" \
+                "ALTER DATABASE ${DB_NAME} OWNER TO ${DB_NAME};" \
+                "REVOKE ALL ON DATABASE ${DB_NAME} FROM PUBLIC;" \
+                "GRANT CONNECT, TEMPORARY ON DATABASE ${DB_NAME} TO ${DB_NAME};"
+            } | docker exec -i "$PG_CID" psql -U postgres -v ON_ERROR_STOP=1 -q
+            docker exec "$PG_CID" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -qc "ALTER SCHEMA public OWNER TO ${DB_NAME};"
+
+            echo "4. Секреты приложения (swarm secrets, в контейнере - файлы в tmpfs /run/secrets)..."
+            # Пароль в URL: кодируем каждый байт (@ : / # и т.п. иначе ломают DSN)
+            DB_PASSWORD_ENC=$(printf '%s' "$DB_PASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')
+            DB_URL_SECRET="dmc-database-url-${SFX}-${RUN_ID}"
+            printf '%s' "postgresql://${DB_NAME}:${DB_PASSWORD_ENC}@dmc-postgres:5432/${DB_NAME}" \
+              | docker secret create "$DB_URL_SECRET" - >/dev/null
+            # Пустой swarm secret создать нельзя, поэтому LLM-ключ добавляется только если задан
+            LLM_SECRET=""
+            if [ -n "$LLM_API_KEY" ]; then
+              LLM_SECRET="dmc-llm-api-key-${SFX}-${RUN_ID}"
+              printf '%s' "$LLM_API_KEY" | docker secret create "$LLM_SECRET" - >/dev/null
+            fi
+            # uid 1000 = appuser из Dockerfile
+            SECRET_DB="source=${DB_URL_SECRET},target=database_url,uid=1000,mode=0400"
+            SECRET_LLM="source=${LLM_SECRET},target=llm_api_key,uid=1000,mode=0400"
+
+            API_CHANGED=""
+            fail() {
+              echo "ОШИБКА: $1"
+              docker service ps --no-trunc "$2" 2>&1 | head -n 10 || true
+              docker service logs --tail 50 "$2" 2>&1 || true
+              if [ "$API_CHANGED" = "updated" ]; then
+                echo "Откат API на предыдущую версию..."
+                docker service rollback --detach=false "$API" >/dev/null 2>&1 || true
+              elif [ "$API_CHANGED" = "created" ]; then
+                docker service rm "$API" >/dev/null 2>&1 || true
+              fi
+              exit 1
+            }
+            update_completed() {
+              [ "$(docker service inspect -f '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}' "$1")" = "completed" ]
+            }
+            task_running() {
+              docker service ps "$1" --filter desired-state=running --format '{{.CurrentState}}' | grep -q '^Running'
+            }
+
+            # $1 - сервис; дальше - аргументы для create (публикация порта, healthcheck, команда после образа)
+            deploy_service() {
+              SVC="$1"; shift
+              if docker service inspect "$SVC" >/dev/null 2>&1; then
+                OLD_SECRETS=$(docker service inspect -f '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}--secret-rm {{.SecretName}} {{end}}' "$SVC")
+                LLM_ADD=""; [ -z "$LLM_SECRET" ] || LLM_ADD="--secret-add $SECRET_LLM"
+                # failure-action rollback: swarm сам вернет предыдущую версию, если новая не станет healthy
+                timeout 300 docker service update --detach=false --quiet --no-resolve-image \
+                  --image "$IMAGE" $OLD_SECRETS --secret-add "$SECRET_DB" $LLM_ADD \
+                  --env-add "APP_ENV=${APP_ENV}" --env-add "RELEASE_TAG=${{ github.sha }}" \
+                  --env-add "REDIS_URL=redis://dmc-redis:6379/${REDIS_DB}" \
+                  "$SVC" || true
+                update_completed "$SVC" || fail "обновление $SVC не завершилось, swarm откатил его на предыдущую версию" "$SVC"
+                CHANGED=updated
+              else
+                # Миграция со standalone-контейнеров (освобождаем имя и порт)
+                docker rm -f "$SVC" "${SVC}-prev" >/dev/null 2>&1 || true
+                LLM_ADD=""; [ -z "$LLM_SECRET" ] || LLM_ADD="--secret $SECRET_LLM"
+                timeout 300 docker service create --detach=false --quiet --no-resolve-image \
+                  --name "$SVC" --network dmc-overlay --secret "$SECRET_DB" $LLM_ADD \
+                  --env "APP_ENV=${APP_ENV}" --env "RELEASE_TAG=${{ github.sha }}" \
+                  --env "REDIS_URL=redis://dmc-redis:6379/${REDIS_DB}" \
+                  --update-order start-first --update-failure-action rollback --update-monitor 20s \
+                  --rollback-order start-first \
+                  "$@" || true
+                if ! task_running "$SVC"; then
+                  docker service ps --no-trunc "$SVC" 2>&1 | head -n 10 || true
+                  docker service logs --tail 50 "$SVC" 2>&1 || true
+                  docker service rm "$SVC" >/dev/null 2>&1 || true
+                  fail "$SVC не запустился" "$SVC"
+                fi
+                CHANGED=created
+              fi
+            }
+
+            echo "5. API (rolling update start-first, healthcheck из Dockerfile; наружу только через Caddy)..."
+            docker inspect dmc-caddy >/dev/null 2>&1 || echo "ВНИМАНИЕ: нет контейнера dmc-caddy, API будет недоступен снаружи. Запустите workflow Terraform Deploy to VPS."
+            deploy_service "$API" "$IMAGE"
+            API_CHANGED="$CHANGED"
+
+            echo "6. Проверка /healthcheck внутри контейнера (до 30 секунд)..."
+            HEALTHY=0
+            for i in $(seq 1 30); do
+              API_CID=$(docker ps -q --filter "label=com.docker.swarm.service.name=${API}" | head -n 1)
+              if [ -n "$API_CID" ] && docker exec "$API_CID" python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthcheck')" >/dev/null 2>&1; then HEALTHY=1; break; fi
+              sleep 1
+            done
+            [ "$HEALTHY" = "1" ] || fail "API не отвечает на /healthcheck" "$API"
+
+            echo "7. Worker (ARQ, healthcheck arq --check)..."
+            deploy_service "$WORKER" \
+              --health-cmd "arq --check app.worker.WorkerSettings" \
+              --health-interval 5s --health-start-period 5s \
+              "$IMAGE" arq app.worker.WorkerSettings
+
+            echo "Успех. Старые секреты удаляются после проверки с раннера."
+            docker service ls --filter name=dmc-
+
+      - name: Verify API health from runner (via Caddy, HTTPS)
+        id: verify
+        run: |
+          # Первый запрос к новому домену может ждать выпуска сертификата
+          curl -fsS --connect-timeout 10 --retry 10 --retry-delay 6 --retry-all-errors \
+            "${{ needs.build-and-push.outputs.url }}/api/healthcheck"
+
+      - name: Remove unused secrets and images
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ vars.VPS_DMC268_IP_T5 }}
@@ -68,102 +257,25 @@ jobs:
           password: ${{ secrets.VPS_DMC268_P }}
           script_stop: true
           script: |
-            IMAGE="${{ needs.build-and-push.outputs.image }}"
             SFX="${{ needs.build-and-push.outputs.suffix }}"
-            PORT="${{ needs.build-and-push.outputs.api_port }}"
-            REDIS_DB="${{ needs.build-and-push.outputs.redis_db }}"
-            DB_NAME="dmc_${SFX}"
-            API="dmc-api-${SFX}"
-            WORKER="dmc-worker-${SFX}"
-
-            command -v docker >/dev/null || { echo "ОШИБКА: docker не установлен. Сначала запустите workflow Terraform Deploy to VPS."; exit 1; }
-            [ -n "${{ secrets.DB_PASSWORD }}" ] || { echo "ОШИБКА: секрет DB_PASSWORD пуст (проверьте secrets репозитория/Environment)."; exit 1; }
-            [ -n "${{ secrets.AI_DMC268_T5 }}" ] || echo "ВНИМАНИЕ: секрет AI_DMC268_T5 пуст."
-
-            echo "1. Авторизация в GHCR и загрузка образа..."
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull "$IMAGE"
-
-            echo "2. Postgres (создается один раз, пароль через STDIN)..."
-            docker network inspect dmc-net >/dev/null 2>&1 || docker network create dmc-net
-            docker volume inspect dmc-pgdata >/dev/null 2>&1 || docker volume create dmc-pgdata
-            if ! docker inspect dmc-postgres >/dev/null 2>&1; then
-              echo "POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }}" | docker run -d \
-                --name dmc-postgres --restart unless-stopped --network dmc-net \
-                -v dmc-pgdata:/var/lib/postgresql/data \
-                --health-cmd "pg_isready -U postgres" --health-interval 5s \
-                --env-file /dev/stdin postgres:17-alpine
-            fi
-            docker start dmc-postgres >/dev/null 2>&1 || true
-            # TCP-проверка: при первом старте временный сервер initdb слушает только сокет
-            PG_READY=0
-            for i in $(seq 1 60); do
-              if docker exec dmc-postgres pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then PG_READY=1; break; fi
-              sleep 1
+            # Секреты, которые использует сервис, docker удалить не даст - они остаются
+            for S in $(docker secret ls --format '{{.Name}}' | grep -E "^(dmc-database-url-${SFX}-|dmc-llm-api-key-${SFX}-|dmc-pg-password-)"); do
+              docker secret rm "$S" >/dev/null 2>&1 || true
             done
-            [ "$PG_READY" = "1" ] || { echo "ОШИБКА: Postgres не стал доступен"; docker logs --tail 30 dmc-postgres; exit 1; }
-            docker exec dmc-postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
-              || docker exec dmc-postgres psql -U postgres -c "CREATE DATABASE ${DB_NAME}"
+            docker secret ls
+            # Образы, которые использует контейнер или сервис, не удаляются; 24h - запас для параллельного деплоя
+            docker image prune -af --filter "until=24h"
 
-            rollback() {
-              echo "ОШИБКА: новая версия не запустилась, выполняю откат..."
-              docker logs --tail 50 "$API" 2>&1 || true
-              docker rm -f "$API" "$WORKER" >/dev/null 2>&1 || true
-              if [ "$HAS_PREV" = "1" ]; then
-                docker rename "${API}-prev" "$API" && docker start "$API"
-                [ "$HAS_PREV_W" = "1" ] && docker rename "${WORKER}-prev" "$WORKER" && docker start "$WORKER"
-                echo "Откат выполнен: запущена предыдущая версия."
-              else
-                echo "Предыдущей версии нет, откатываться некуда."
-              fi
-              exit 1
-            }
-
-            echo "3. Ротация контейнеров (старые сохраняются для отката)..."
-            docker rm -f "${API}-prev" "${WORKER}-prev" >/dev/null 2>&1 || true
-            HAS_PREV=0; HAS_PREV_W=0
-            if docker inspect "$API" >/dev/null 2>&1; then
-              docker stop "$API"; docker rename "$API" "${API}-prev"; HAS_PREV=1
-            fi
-            if docker inspect "$WORKER" >/dev/null 2>&1; then
-              docker stop "$WORKER"; docker rename "$WORKER" "${WORKER}-prev"; HAS_PREV_W=1
-            fi
-
-            ENV_STREAM() {
-              cat << EOF
-            APP_ENV=${{ needs.build-and-push.outputs.environment }}
-            RELEASE_TAG=${{ github.sha }}
-            LLM_API_KEY=${{ secrets.AI_DMC268_T5 }}
-            DATABASE_URL=postgresql://postgres:${{ secrets.DB_PASSWORD }}@dmc-postgres:5432/${DB_NAME}
-            REDIS_URL=redis://dmc-redis:6379/${REDIS_DB}
-            EOF
-            }
-
-            echo "4. Запуск API (секреты через STDIN)..."
-            ENV_STREAM | sed 's/^ *//' | docker run -d --name "$API" --restart unless-stopped \
-              --network dmc-net -p "${PORT}:8000" --env-file /dev/stdin "$IMAGE" || rollback
-
-            echo "5. Запуск worker (ARQ)..."
-            ENV_STREAM | sed 's/^ *//' | docker run -d --name "$WORKER" --restart unless-stopped \
-              --network dmc-net --no-healthcheck --env-file /dev/stdin "$IMAGE" \
-              arq app.worker.WorkerSettings || rollback
-
-            echo "6. Проверка /healthcheck (до 30 секунд)..."
-            HEALTHY=0
-            for i in $(seq 1 30); do
-              if curl -fsS "http://localhost:${PORT}/healthcheck" >/dev/null 2>&1; then HEALTHY=1; break; fi
-              sleep 1
+      - name: Roll back after failed runner check
+        if: failure() && steps.verify.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.VPS_DMC268_IP_T5 }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          script: |
+            SFX="${{ needs.build-and-push.outputs.suffix }}"
+            for SVC in "dmc-api-${SFX}" "dmc-worker-${SFX}"; do
+              docker service rollback --detach=false "$SVC" || echo "Предыдущей версии $SVC нет, откатываться некуда."
             done
-            [ "$HEALTHY" = "1" ] || rollback
-            sleep 3
-            [ "$(docker inspect -f '{{.State.Running}}' "$WORKER")" = "true" ] || rollback
-
-            echo "7. Успех, удаляю резервные контейнеры."
-            docker rm -f "${API}-prev" "${WORKER}-prev" >/dev/null 2>&1 || true
-            docker ps --filter name=dmc-
-
-      - name: Verify API health from runner
-        run: |
-          PORT=${{ needs.build-and-push.outputs.api_port }}
-          curl -fsS --connect-timeout 10 --retry 5 --retry-delay 3 --retry-all-errors \
-            http://${{ vars.VPS_DMC268_IP_T5 }}:${PORT}/healthcheck
+            docker service ls --filter name=dmc-
