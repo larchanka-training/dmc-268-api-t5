@@ -2,7 +2,40 @@
 name = "dmc-268-api-t5"
 version = "0.1.0"
 description = "FastAPI backend for DMC-268 Team 5"
+requires-python = ">=3.13,<4.0"
 dependencies = [
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0"
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic-settings>=2.4.0",
 ]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.6.0"
+mypy = ">=1.11.0"
+pytest = ">=8.3.0"
+pre-commit = ">=3.8.0"
+httpx2 = "^2.13.1"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+extend-exclude = [".npm-cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["^\\.venv/", "^\\.npm-cache/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
