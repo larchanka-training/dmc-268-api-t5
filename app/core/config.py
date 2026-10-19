@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     release_tag: str = "dev"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/dmc"
 
 
 @lru_cache
