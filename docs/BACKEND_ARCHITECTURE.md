@@ -1,6 +1,6 @@
 # Архитектура backend сервиса ревью кода
 
-**Формат:** arc42 · **Версия:** 1.4 · **Дата:** 2026-09-19
+**Формат:** arc42 · **Версия:** 1.5 · **Дата:** 2026-10-19
 
 ## 1. Введение и цели
 
@@ -20,16 +20,18 @@
 
 | Область | Решение |
 |---|---|
-| Backend | Python, FastAPI, Clean / Hexagonal architecture |
+| Backend | Python, FastAPI, Hexagonal architecture (Ports & Adapters) |
 | Данные | Одна PostgreSQL для API, webhook, workers и RAG |
 | Внешний вход | API Gateway на Nginx; остальные сервисы в приватной сети |
 | Клиенты | SaaS для нескольких организаций; первая интеграция — GitHub App |
 | Авторизация | Своя проверка пользователя в portal и своя проверка GitHub в webhook |
 | Запуск работы | Подписка и резерв токенов проверяются до очереди |
 | Параллелизм | Четыре review workers, по одному ревью на процесс |
+| Очередь | RabbitMQ — единственный брокер сообщений |
+| Развёртывание | Docker Compose; Kubernetes на старте не используется |
 | Контекст кода | Tree-sitter и RAG; векторы хранятся через pgvector |
 
-**Используем RabbitMQ и BullMQ.** RabbitMQ принимает события, bridge передаёт их в BullMQ, а BullMQ запускает обработку заданий в workers. Для BullMQ используется Redis. Обязанности компонентов — в §9.
+**Используем один брокер — RabbitMQ.** Он принимает события из outbox и доставляет их напрямую в workers: review, index и publish. Отдельного bridge, BullMQ и Redis нет. Обязанности компонентов — в §9.
 
 Пока не выбраны поставщики identity, оплаты, LLM и embeddings, тарифные лимиты, сроки хранения и SLA. Их нужно определить до production.
 
@@ -43,7 +45,7 @@
 | Учёт подписок | Доверенные серверные обновления подписки организации |
 | LLM / embeddings API | Ограниченный контекст кода и запрос на анализ или построение векторов |
 
-Nginx принимает HTTPS и направляет запросы в portal или webhook. Права на данные проверяют сами приложения. PostgreSQL, RabbitMQ и Redis не имеют публичных портов. Workers обращаются к внешним API через разрешённые исходящие соединения.
+Nginx принимает HTTPS и направляет запросы в portal или webhook. Права на данные проверяют сами приложения. PostgreSQL и RabbitMQ не имеют публичных портов. Workers обращаются к внешним API через разрешённые исходящие соединения.
 
 `LLMGateway` — адаптер вызова модели внутри backend. Это отдельное понятие от Nginx/API Gateway; публичного маршрута к модели нет.
 
@@ -71,11 +73,9 @@ flowchart TB
     API --> DB
     DB -->|Outbox| Dispatch["Dispatch"]
     Dispatch --> MQ["RabbitMQ: review, index, publish"]
-    MQ --> Bridge["Bridge — модуль dispatch"]
-    Bridge --> Bull["BullMQ / Redis"]
-    Bull --> Review["Review workers × 4"]
-    Bull --> Index["Index worker / RAG Filler"]
-    Bull --> Publish["Publish worker"]
+    MQ --> Review["Review workers × 4"]
+    MQ --> Index["Index worker / RAG Filler"]
+    MQ --> Publish["Publish worker"]
     Review --> RAG["RAG — модуль worker"]
     RAG --> DB
     Review --> DB
@@ -98,8 +98,7 @@ Auth, AdmissionService, RAG и Gateways на схеме — модули код�
 | SubscriptionService | Актуальный серверный статус подписки и разрешённые операции |
 | TokenBudgetService | Резервы, разрешение платных вызовов, учёт расхода и возврат остатка |
 | GitHubCredentialProvider | Получение и обновление installation token с нужными правами |
-| Dispatch | Outbox → RabbitMQ; bridge → BullMQ; отложенные повторы и восстановление зависших заданий |
-| BullMQ | Запуск обработчиков заданий в workers, управление параллелизмом и состояниями очереди |
+| Dispatch | Outbox → RabbitMQ; отложенные повторы и восстановление зависших заданий |
 | Review worker | Diff → контекст → prompt → LLM → проверка ответа → Findings |
 | Index worker | Получение кода, разбор Tree-sitter, построение и обновление RAG-индекса |
 | Publish worker | Inline-комментарии, ограничения GitHub и сверка результата отправки |
@@ -114,39 +113,50 @@ Application Service → Domain
         ↓
 Порты: Store, GitHubGateway, LLMGateway, Queue
         ↑ реализуют
-Адаптеры: SQLAlchemy, GitHub API, LLM API, RabbitMQ, BullMQ
+Адаптеры: SQLAlchemy, GitHub API, LLM API, RabbitMQ
 ```
 
-Router разбирает запрос, Service выполняет сценарий, Store читает и сохраняет данные. Service обращается к LLM через отдельный порт. Repository-адаптер не вызывает модель. Domain не зависит от FastAPI, ORM и очередей; адаптеры подключаются в `bootstrap.py`.
+Router разбирает запрос, Service выполняет сценарий, Repository читает и сохраняет данные. Service обращается к LLM через отдельный порт. Repository-адаптер не вызывает модель. Domain не зависит от FastAPI, ORM и очередей; адаптеры подключаются в `bootstrap.py`.
 
-Доменная сущность `Repository` означает Git-репозиторий. Интерфейс её хранения называется `RepositoryStore`, чтобы не путать эти значения.
+Доменная сущность `Repository` означает Git-репозиторий. Интерфейс хранения (паттерн Repository) в коде называется `RepositoryStore` (и аналогично `ReviewJobStore`, `FindingStore`), чтобы не путать эти значения.
+
+Сквозной путь запроса на ревью:
+
+```mermaid
+flowchart LR
+    Router["Router (FastAPI, Pydantic-схемы)"] --> Service["Service (application)"]
+    Service --> Domain["Domain (сущности, правила)"]
+    Service -->|порт| Store["Repository / Store"]
+    Service -->|порт| LLMPort["LLM Gateway"]
+    Store -.реализует.-> SA["SQLAlchemy 2 + PostgreSQL"]
+    LLMPort -.реализует.-> LLMApi["LLM API"]
+```
+
+| Слой | Правило зависимостей |
+|---|---|
+| Router | Знает Service и Pydantic-схемы; не обращается к БД и LLM |
+| Service | Знает Domain и интерфейсы (порты); не знает FastAPI и SQLAlchemy |
+| Repository / Store | Реализует порт хранения на SQLAlchemy; транзакцией управляет Service через Unit of Work |
+| LLM Gateway | Реализует порт модели; вызывается только Service review-worker, вне транзакций БД |
 
 ### 5.3. Целевая структура проекта
 
 ```text
 backend/
-  ARCHITECTURE.md
   README.md                  # настройка, запуск, миграции, диагностика
   Dockerfile                 # общий образ всех процессов backend
   .dockerignore              # исключает .env, ключи, Git и временные файлы
-  compose.yaml               # локальное окружение и пилот
+  docker-compose.yml         # локальное окружение и пилот
   .env.example               # переменные и безопасные примеры значений
   .gitignore                 # .env, ключи, checkout, локальные данные
   pyproject.toml             # зависимости и настройки Python-проекта
-  docs/diagrams/erd.mmd
+  docs/
+    BACKEND_ARCHITECTURE.md
+    diagrams/erd.mmd
   deploy/
     nginx.conf
     rabbitmq/                # очереди, DLQ и политики брокера
-    redis.conf               # persistence и noeviction для BullMQ
     observability/           # сбор логов, метрики и правила оповещений
-    k8s/
-      deployments.yaml       # API, webhook, dispatch, workers + probes
-      services.yaml          # внутренние адреса приложений
-      gateway.yaml           # Nginx, внешний Service и TLS
-      configmap.yaml         # настройки без секретов
-      secrets.example.yaml   # только имена ключей и пустые значения
-      migration-job.yaml     # разовый запуск Alembic
-      network-policies.yaml  # разрешённые связи и исходящие запросы
   app/
     entrypoints/             # portal, webhook, dispatch, review, index, publish
     api/                     # routers и Pydantic-схемы
@@ -158,8 +168,8 @@ backend/
     domain/                  # сущности и бизнес-правила
     prompts/                 # system prompt, defaults, JSON Schema ответа
     infrastructure/
-      db/                    # ORM-модели, Store, сессии
-      messaging/             # RabbitMQ relay, bridge, BullMQ workers
+      db/                    # base.py, session.py, models/ (core, rag, transport), Store
+      messaging/             # RabbitMQ relay и consumers
       github/
       llm/
       rag/
@@ -167,7 +177,7 @@ backend/
     bootstrap.py
   alembic/
     env.py
-    versions/                # в том числе первая миграция
+    versions/                # в том числе первая миграция 0001_initial
   alembic.ini
   tests/
     unit/
@@ -175,7 +185,7 @@ backend/
     scenarios/
 ```
 
-Назначение deploy-файлов и порядок запуска описаны в §7. Исполняемый backend, ORM-модели и миграции добавляются на этапе реализации.
+Назначение deploy-файлов и порядок запуска описаны в §7. ORM-модели и первая миграция Alembic уже в репозитории; остальной исполняемый backend добавляется на этапе реализации.
 
 ## 6. Как выполняется работа
 
@@ -183,10 +193,10 @@ backend/
 
 1. GitHub отправляет событие PR. Webhook проверяет подпись, подключение и повторную доставку.
 2. AdmissionService проверяет подписку и доступ к GitHub. В короткой транзакции резервирует токены, создаёт ReviewJob и outbox. После commit webhook отвечает GitHub.
-3. Dispatch отправляет событие в RabbitMQ. Bridge добавляет задание в BullMQ и подтверждает сообщение RabbitMQ. BullMQ запускает обработчик в свободном worker; тот получает аренду задания в PostgreSQL.
+3. Dispatch отправляет событие в RabbitMQ (publisher confirm). Свободный review worker получает сообщение, проверяет задание и допуск, получает аренду в PostgreSQL и подтверждает (ACK) сообщение только после сохранения состояния.
 4. Worker получает diff по сохранённым SHA, читает `.review.yaml`, добавляет контекст RAG и делит большой diff на части.
 5. Для каждой части сохраняет вход модели, получает разрешение на расход, вызывает LLM и проверяет ответ. Результаты и фактический расход записываются в БД.
-6. Worker создаёт Publication и событие публикации. Publish worker отправляет inline-комментарии и сохраняет их GitHub ID.
+6. Worker создаёт Publication и outbox-событие `publish.requested` одной транзакцией. Dispatch отправляет его в очередь `publish` RabbitMQ — публикация в GitHub идёт через тот же брокер. Publish worker читает сообщение, отправляет inline-комментарии и сохраняет их GitHub ID.
 7. Portal показывает результат анализа, проверенную часть diff и статус публикации отдельно.
 
 Worker проверяет актуальность задания и допуска перед затратными этапами. Сетевые вызовы GitHub и LLM выполняются вне транзакций БД.
@@ -197,13 +207,19 @@ Worker проверяет актуальность задания и допус�
 
 Не начатый старый запуск получает `superseded`; его свободный резерв можно передать новому запуску одной транзакцией. Уже потраченные и ещё не подтверждённые токены не возвращаются автоматически. Перед публикацией head проверяется снова; review всегда отправляется с сохранённым commit SHA. Push между проверкой и POST остаётся возможным.
 
-При подключении репозитория и обновлении основной ветки создаётся отдельное задание индексации. Index worker строит snapshot по SHA и переводит его в `ready` только после завершения. Старый медленный запуск не может заменить указатель на более новый индекс. Изменения незамерженного PR не попадают в общий активный индекс.
+Данные попадают в RAG через события основной ветки:
+
+1. При подключении репозитория создаётся первое задание индексации для HEAD основной ветки.
+2. GitHub присылает `pull_request` с `action=closed` и `merged=true` для PR в основную ветку (и `push` в неё). Webhook проверяет подпись, подключение и что ветка — основная; затем в одной транзакции AdmissionService резервирует токены на embeddings, создаёт `RepositorySnapshot(queued)` для merge commit SHA и outbox-событие `index.requested`.
+3. Dispatch отправляет событие в очередь `index`. Index worker получает код по SHA, находит изменённые файлы относительно предыдущего готового snapshot, для неизменённых файлов переиспользует chunks и embeddings (в пределах одного репозитория), для изменённых — разбирает Tree-sitter, режет на chunks и строит embeddings через Embedding Gateway.
+4. Snapshot переходит в `ready` только после записи всех файлов. В той же транзакции `repositories.active_snapshot_id` переключается на него — если он новее текущего активного. Старый медленный запуск указатель не откатывает.
+5. Изменения незамерженного PR в общий индекс не попадают: ревью берёт контекст из активного snapshot по base SHA, а изменённый код — из head-версии diff.
 
 ### 6.3. Повторы и восстановление
 
 Dispatch использует `next_attempt_at`, число попыток и аренду из PostgreSQL. Повторы имеют увеличивающуюся задержку и предел; бесконечной повторной отправки нет. Для нового события увеличивается `dispatch_generation`, поэтому worker может отклонить старую доставку.
 
-Recovery выбирает только незавершённые задания с истёкшей арендой или превышенным сроком ожидания. Проверяет состояние в PostgreSQL и последнюю доставку в BullMQ: ожидающее задание и работу с действующей арендой повторно не добавляет. Недоступность Redis не считается потерей задания. Если нужна новая отправка, проверяет допуск, увеличивает поколение и задаёт следующую проверку. `failed`, `cancelled` и `superseded` автоматически не оживают.
+Recovery выбирает только незавершённые задания с истёкшей арендой или превышенным сроком ожидания. Проверяет состояние в PostgreSQL: работу с действующей арендой повторно не отправляет. Недоступность RabbitMQ не считается потерей задания — событие остаётся в outbox. Если нужна новая отправка, проверяет допуск, увеличивает поколение и задаёт следующую проверку. `failed`, `cancelled` и `superseded` автоматически не оживают.
 
 Сценарии сбоев и ожидаемые результаты собраны в §10.
 
@@ -211,17 +227,17 @@ Recovery выбирает только незавершённые задания
 
 ### 7.1. Процессы и сеть
 
-| Сервис Compose / Kubernetes | Начальное количество |
+| Сервис Compose | Начальное количество |
 |---|---:|
 | `nginx`, `be-api`, `webhook`, `dispatch` | По 1 |
-| `review-worker` | 4 BullMQ Worker, у каждого `concurrency=1` |
+| `review-worker` | 4 процесса, у каждого `prefetch=1` |
 | `index-worker`, `publish-worker` | По 1 |
-| `postgres` с pgvector, `rabbitmq`, `redis` | По 1 для пилота |
+| `postgres` с pgvector, `rabbitmq` | По 1 для пилота |
 | `migrate` | Разовая команда, не постоянный процесс |
 
-Для пилота достаточно Compose. Kubernetes запускает те же процессы как отдельные Deployments. PostgreSQL, RabbitMQ и Redis в production требуют постоянных дисков, резервирования и выбранной схемы отказоустойчивости; один экземпляр её не обеспечивает.
+Для старта достаточно Docker Compose. Kubernetes не требуется: все процессы — один образ с разными командами, поэтому при необходимости они запускаются как отдельные Deployments без смены архитектуры. Нужен ли кластер, решается после пилота (§11). PostgreSQL и RabbitMQ в production требуют постоянных дисков, резервирования и выбранной схемы отказоустойчивости; один экземпляр её не обеспечивает.
 
-Compose/Kubernetes запускает и перезапускает процессы workers. Внутри каждого работает BullMQ Worker: он получает задание и запускает его обработчик. Четыре процесса с `concurrency=1` дают четыре параллельных ревью. Используется Python-клиент BullMQ. [BullMQ: Python Worker](https://docs.bullmq.io/python/introduction).
+Compose запускает и перезапускает процессы workers. Каждый review-worker — AMQP-consumer с `prefetch=1` и ручным ACK: он берёт одно сообщение, обрабатывает его и подтверждает. Четыре процесса дают четыре параллельных ревью.
 
 Nginx публикует только HTTPS :443. Маршруты `/api/v1/…` → `be-api:8000` и `/webhooks/github` → `webhook:8000` заданы в [deploy/nginx.conf](deploy/nginx.conf). Нужно указать домен и установить TLS-сертификаты. Nginx сохраняет путь, тело и заголовки запроса для проверки подписи. При смене адресов upstream в этом примере нужен reload. [Документация Nginx](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass).
 
@@ -232,10 +248,10 @@ Nginx публикует только HTTPS :443. Маршруты `/api/v1/…`
 | Файл | Содержимое |
 |---|---|
 | `Dockerfile` | Закреплённые зависимости, запуск не от root, один образ с разными командами процессов |
-| `compose.yaml` | Сервисы из §7.1, healthchecks, зависимости по готовности, volumes PostgreSQL/RabbitMQ/Redis, сети и лимиты ресурсов. У review worker нет фиксированного `container_name`, мешающего масштабированию |
-| `.env.example` | Адреса БД/RabbitMQ/Redis, имена очередей BullMQ, настройки identity и GitHub App, модели, лимиты заданий, логирование/OTel. Только примеры; реальные ключи передаются через секреты или локальный `.env` |
+| `docker-compose.yml` | Сервисы из §7.1, healthchecks, зависимости по готовности, volumes PostgreSQL/RabbitMQ, сети и лимиты ресурсов. У review worker нет фиксированного `container_name`, мешающего масштабированию |
+| `.env.example` | Адреса БД/RabbitMQ, имена очередей, настройки identity и GitHub App, модели, лимиты заданий, логирование/OTel. Только примеры; реальные ключи передаются через секреты или локальный `.env` |
 | `README.md` | Требования к окружению, заполнение настроек, TLS и GitHub webhook, запуск, миграции, проверка состояния, логи и остановка |
-| `deploy/k8s/` | Deployments, Services, ConfigMap, ссылки на Secrets, probes, requests/limits, NetworkPolicy и разовый Job миграций |
+| `deploy/rabbitmq/` | Определения exchange, очередей, DLQ и политик |
 
 У каждого процесса свой ограниченный pool соединений с БД. Разбор больших файлов выполняется вне основного asyncio event loop. Секреты и временные checkout не попадают в образ или Git.
 
@@ -247,7 +263,7 @@ Nginx публикует только HTTPS :443. Маршруты `/api/v1/…`
 cp .env.example .env
 # Заполнить .env, установить TLS-сертификаты и настроить GitHub App.
 docker compose build
-docker compose up -d --wait postgres rabbitmq redis
+docker compose up -d --wait postgres rabbitmq
 docker compose run --rm migrate
 docker compose up -d --wait --scale review-worker=4 \
   be-api webhook dispatch review-worker index-worker publish-worker nginx
@@ -257,52 +273,24 @@ docker compose logs -f webhook review-worker publish-worker
 
 Сервис `migrate` выполняет `alembic upgrade head` из того же образа, но с отдельной ролью БД. Он имеет профиль `ops` и запускается явно один раз перед приложениями. Флаг `--wait` опирается на healthchecks сервисов. [Compose up](https://docs.docker.com/reference/cli/docker/compose/up/), [профили Compose](https://docs.docker.com/compose/how-tos/profiles/).
 
-Проверка запуска: сервисы готовы, видны четыре review workers, тестовый webhook создаёт одно задание, статус анализа и комментарии доступны владельцу. Остановка — `docker compose down`, с сохранением volumes. Обновление — сборка образа, совместимая миграция и перезапуск процессов; для Kubernetes миграцию выполняет отдельный Job релиза.
+Проверка запуска: сервисы готовы, видны четыре review workers, тестовый webhook создаёт одно задание, статус анализа и комментарии доступны владельцу. Остановка — `docker compose down`, с сохранением volumes. Обновление — сборка образа, совместимая миграция и перезапуск процессов.
 
-### 7.4. Healthchecks и Kubernetes probes
+### 7.4. Healthchecks
 
-Каждый процесс имеет внутренний health endpoint: у FastAPI на порту 8000, у dispatch/workers — небольшой HTTP endpoint на 9000.
+Каждый процесс имеет внутренний health endpoint: у FastAPI на порту 8000, у dispatch/workers — небольшой HTTP endpoint на 9000. Compose использует их в `healthcheck`, а `depends_on: condition: service_healthy` и `--wait` опираются на результат.
 
-| Проверка | Endpoint | Успех означает | Что делает Kubernetes при сбое |
-|---|---|---|---|
-| Startup | `/health/startup` | Конфигурация и локальные модули загружены | Даёт время на старт; затем перезапускает контейнер |
-| Liveness | `/health/live` | Основной цикл процесса отвечает | Перезапускает зависший контейнер |
-| Readiness | `/health/ready` | Процесс может принимать свою работу | Убирает Pod из готовых адресов Service |
+| Проверка | Endpoint | Успех означает |
+|---|---|---|
+| Liveness | `/health/live` | Основной цикл процесса отвечает |
+| Readiness | `/health/ready` | Процесс может принимать свою работу |
 
-Liveness не зависит от PostgreSQL, RabbitMQ, Redis, GitHub или LLM: авария провайдера не должна перезапускать весь backend. Startup также проверяет локальный запуск; ожидание внешних зависимостей относится к readiness. Пока startup не прошёл, остальные probes не запускаются. [Kubernetes: виды probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/).
-
-Readiness для portal/webhook требует доступной БД и совместимой схемы; RabbitMQ и Redis для приёма не обязательны — событие сохраняется в outbox. Dispatch проверяет БД, RabbitMQ и Redis. Workers проверяют БД, Redis и цикл BullMQ, поэтому сбой RabbitMQ не мешает уже переданным заданиям. Занятый здоровый worker остаётся ready. GitHub/LLM не опрашиваются probes; их сбои обрабатывает логика задания.
+Liveness не зависит от PostgreSQL, RabbitMQ, GitHub или LLM: авария провайдера не должна перезапускать весь backend. Readiness для portal/webhook требует доступной БД и совместимой схемы; RabbitMQ для приёма не обязателен — событие сохраняется в outbox. Dispatch и workers проверяют БД и RabbitMQ. Занятый здоровый worker остаётся ready. GitHub/LLM не опрашиваются; их сбои обрабатывает логика задания.
 
 Проверки короткие, с таймаутом и без изменений данных. Health HTTP-сервер worker следит за heartbeat основного цикла, чтобы не показывать успех при его зависании.
 
-Пример полей контейнера review worker:
+При SIGTERM consumer прекращает получать новые сообщения; текущий допустимый этап завершается с сохранением состояния. `stop_grace_period` согласуется с таймаутами этапов; если времени не хватило, неподтверждённое сообщение вернётся в очередь и работа восстановится по БД. Внешний вызов с неизвестным исходом сначала сверяется. Аренды заданий и учёт вызовов защищают от повторного эффекта после потери связи со старым процессом.
 
-```yaml
-ports:
-  - name: health
-    containerPort: 9000
-startupProbe:
-  httpGet: {path: /health/startup, port: health}
-  periodSeconds: 5
-  timeoutSeconds: 2
-  failureThreshold: 24
-livenessProbe:
-  httpGet: {path: /health/live, port: health}
-  periodSeconds: 10
-  timeoutSeconds: 2
-  failureThreshold: 3
-readinessProbe:
-  httpGet: {path: /health/ready, port: health}
-  periodSeconds: 5
-  timeoutSeconds: 2
-  failureThreshold: 3
-```
-
-Значения — стартовые настройки для проверки нагрузкой. [Kubernetes: настройка probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/).
-
-Readiness сама не останавливает обработку очередей. При потере готовности или SIGTERM bridge прекращает приём из RabbitMQ, а worker — получение новых заданий BullMQ. Текущий допустимый этап завершается с сохранением состояния. `terminationGracePeriodSeconds` согласуется с таймаутами этапов; если времени не хватило, работа восстанавливается по БД и состоянию очереди. Внешний вызов с неизвестным исходом сначала сверяется.
-
-При rolling update четырёх workers используется `maxSurge: 0`, чтобы не добавлять пятый экземпляр во время обновления. Аренды заданий и учёт вызовов защищают от повторного эффекта после потери связи со старым процессом.
+Если позже понадобится Kubernetes, эти же endpoints используются как startup/liveness/readiness probes.
 
 ## 8. Общие правила
 
@@ -314,13 +302,10 @@ Readiness сама не останавливает обработку очере
 | PostgreSQL `rag` | Версии индекса, фрагменты кода, связи и embeddings |
 | PostgreSQL `transport` | Принятые webhook и outbox |
 | RabbitMQ | Сообщения со ссылками на задания и DLQ для проблемных сообщений |
-| Redis / BullMQ | Ожидающие и активные задания, состояния выполнения и блокировки очереди |
 | Диск worker | Временный checkout, отдельный для каждого задания |
 | Хранилище секретов | Ключ GitHub App, webhook secret и credentials провайдеров |
 
 GitHub хранит историю кода. В PostgreSQL остаются нужные для поиска фрагменты и точный вход LLM-вызова; полный `.git` и AST не сохраняются. Отдельные S3, vector DB и graph DB в первой версии не нужны.
-
-Redis выделен под BullMQ: включены persistence и `maxmemory-policy=noeviction`. Он не заменяет PostgreSQL и не используется как вытесняемый кэш. [BullMQ: production](https://docs.bullmq.io/guide/going-to-production).
 
 RAG-индекс — `RepositorySnapshot` для одного репозитория, SHA и профиля индексации. Профиль фиксирует парсеры, правила разбиения, embedding-модель и размерность. Tree-sitter выделяет функции, классы и синтаксические связи; полноценный граф вызовов он не гарантирует. [Tree-sitter](https://tree-sitter.github.io/tree-sitter/).
 
@@ -351,6 +336,7 @@ erDiagram
     Publication ||--o{ Comment : contains
     Finding ||--o| Comment : delivered_as
     Repository ||--o{ RepositorySnapshot : indexed_as
+    Repository o|--o| RepositorySnapshot : active_snapshot
     RepositorySnapshot ||--o{ CodeChunk : contains
     RepositorySnapshot ||--o{ CodeEdge : contains
     CodeChunk ||--o{ CodeEdge : source
@@ -360,18 +346,26 @@ erDiagram
 
     Organization {
         uuid id PK
-        string identity_subject UK
+        text name
+        text identity_subject UK
+        timestamptz created_at
+        timestamptz updated_at
     }
     Subscription {
         uuid id PK
-        uuid organization_id FK
-        string status
-        datetime valid_until
+        uuid organization_id FK, UK
+        text status
+        text plan_version
+        jsonb allowed_operations
+        timestamptz valid_until
+        timestamptz checked_at
     }
     TokenBudget {
         uuid id PK
         uuid organization_id FK
         uuid subscription_id FK
+        timestamptz period_start
+        timestamptz period_end
         bigint allowance_tokens
         bigint consumed_tokens
         bigint reserved_tokens
@@ -380,85 +374,141 @@ erDiagram
         uuid id PK
         uuid organization_id FK
         uuid budget_id FK
-        uuid review_job_id FK
-        uuid snapshot_id FK
+        uuid review_job_id FK "nullable"
+        uuid snapshot_id FK "nullable"
+        text admission_key UK
+        text status
+        bigint granted_tokens
+        bigint consumed_tokens
+        bigint released_tokens
         bigint remaining_tokens
         bigint inflight_tokens
-        string status
     }
     TokenUsage {
         uuid id PK
         uuid organization_id FK
         uuid reservation_id FK
-        string request_key
+        text request_key UK
+        text request_hash
+        text provider_request_id
         bigint upper_bound_tokens
         bigint actual_tokens
-        string status
+        text status
     }
     GitHubInstallation {
         uuid id PK
         uuid organization_id FK
         bigint installation_id UK
+        text account_login
+        text status
     }
     Repository {
         uuid id PK
         uuid organization_id FK
         uuid installation_id FK
-        bigint github_repository_id
+        uuid active_snapshot_id FK "nullable"
+        bigint github_repository_id UK
+        text full_name
+        text default_branch
+        boolean is_enabled
     }
     MergeRequest {
         uuid id PK
         uuid organization_id FK
         uuid repository_id FK
-        bigint number
+        bigint number UK
+        text title
+        text state
+        text base_sha
+        text head_sha
     }
     ReviewJob {
         uuid id PK
         uuid organization_id FK
         uuid merge_request_id FK
-        string head_sha
-        string base_sha
-        string status
+        text run_key UK
+        text head_sha
+        text base_sha
+        text status
+        text pipeline_version
+        text prompt_version
+        text config_hash
+        jsonb config
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
+        int dispatch_generation
     }
     ContextPayload {
         uuid id PK
         uuid organization_id FK
         uuid review_job_id FK
+        int part_no UK
         jsonb payload
+        text payload_hash
+        text model
+        jsonb params
+        timestamptz expires_at
     }
     Finding {
         uuid id PK
         uuid organization_id FK
         uuid review_job_id FK
-        uuid context_payload_id FK
-        string fingerprint
+        uuid context_payload_id FK "nullable"
+        text fingerprint UK
+        text path
+        text side
+        int start_line
+        int end_line
+        text category
+        text severity
+        text body
+        text suggestion
     }
     Publication {
         uuid id PK
         uuid organization_id FK
         uuid review_job_id FK
+        int batch_no UK
+        text status
+        jsonb payload
         bigint github_review_id
-        string status
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
     }
     Comment {
         uuid id PK
         uuid organization_id FK
         uuid publication_id FK
-        uuid finding_id FK
+        uuid finding_id FK, UK
         bigint github_comment_id
+        text status
     }
     RepositorySnapshot {
         uuid id PK
         uuid organization_id FK
         uuid repository_id FK
-        string commit_sha
-        string profile_hash
+        text commit_sha UK
+        text profile_hash UK
+        text embedding_model
+        int embedding_dim
+        text status
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
     }
     CodeChunk {
         uuid id PK
         uuid organization_id FK
         uuid snapshot_id FK
-        string path
+        text path
+        int start_line
+        int end_line
+        text symbol
         text content
         vector embedding
     }
@@ -467,22 +517,33 @@ erDiagram
         uuid organization_id FK
         uuid snapshot_id FK
         uuid source_chunk_id FK
-        uuid target_chunk_id FK
+        uuid target_chunk_id FK "nullable"
+        text edge_type
+        text target_name
     }
     WebhookReceipt {
         uuid id PK
         uuid organization_id FK
-        string delivery_id UK
+        text delivery_id UK
+        text event_type
+        text event_hash
+        text outcome
+        text reject_reason
     }
     OutboxEvent {
         uuid id PK
         uuid organization_id FK
-        string event_type
+        text event_type
+        text aggregate_type
         uuid aggregate_id
+        int dispatch_generation
+        timestamptz available_at
+        timestamptz published_at
+        int attempts
     }
 ```
 
-Внутренние ID — UUID, числовые ID GitHub — BIGINT, время — `TIMESTAMPTZ` в UTC. Данные организации имеют `organization_id`. JSONB используется для настроек и сохранённых запросов; связи, статусы и даты остаются отдельными колонками.
+Внутренние ID — UUID, числовые ID GitHub — BIGINT, время — `TIMESTAMPTZ` в UTC. Колонки-внешние ключи называются `<таблица>_id`; `organization_id` — ссылка на `Organization` (арендатор, он же юридическое лицо или аккаунт-владелец подписки). Цепочка Organization → GitHubInstallation → Repository → MergeRequest → ReviewJob сохраняется, но `organization_id` дублируется в дочерних таблицах намеренно: он нужен для составных FK, запрещающих смешивание данных организаций, и для row-level security. Согласованность дубля гарантирует БД, а не код. JSONB используется для настроек и сохранённых запросов; связи, статусы и даты остаются отдельными колонками.
 
 | Сущность | Что важно сохранить |
 |---|---|
@@ -514,11 +575,11 @@ erDiagram
 
 ### 8.3. ORM и миграции
 
-Используем **SQLAlchemy 2.x + Alembic**, а для HTTP — отдельные Pydantic-схемы. ORM-модели строятся на `DeclarativeBase`, `Mapped` и `mapped_column`; ограничения получают явные имена. Это удобно для составных FK, JSONB, RLS и pgvector.
+Используем **SQLAlchemy 2.x (async, драйвер asyncpg) + Alembic**, а для HTTP — отдельные Pydantic-схемы. SQLModel не выбран: он скрывает составные FK и схемы PostgreSQL, а ORM-модели и API-схемы должны быть разделены. Модели строятся на `DeclarativeBase`, `Mapped` и `mapped_column`; все ограничения получают явные имена (`MetaData.naming_convention`). Модели лежат в `app/infrastructure/db/models/` (`core`, `rag`, `transport`).
 
 Каждая параллельная задача использует свою AsyncSession. Транзакции короткие; обращения к внешним API в них не входят. [SQLAlchemy: сессии и конкурентность](https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks).
 
-Первая миграция создаёт `core`, `rag`, `transport`, подключает `vector`, затем таблицы, ограничения, индексы и RLS. Циклическая ссылка на active snapshot добавляется после обеих таблиц. Миграции запускаются отдельной ролью; runtime-роли получают только нужные права. Autogenerate проверяется вручную, особенно для RLS и расширений. Проверки: upgrade пустой БД, downgrade/upgrade временной БД, совпадение схемы и моделей. `create_all()` при запуске приложения не используется. [Alembic autogenerate](https://alembic.sqlalchemy.org/en/latest/autogenerate.html).
+Первая миграция `0001_initial` создаёт схемы `core`, `rag`, `transport`, подключает `vector`, затем таблицы, ограничения и индексы. Циклическая ссылка `repositories.active_snapshot_id` добавляется после обеих таблиц. Row-level security добавляется отдельной миграцией вместе с ролями БД. Миграции запускаются отдельной ролью; runtime-роли получают только нужные права. Autogenerate проверяется вручную, особенно для расширений. Проверки: upgrade пустой БД, downgrade/upgrade временной БД, `alembic check` (совпадение схемы и моделей). `create_all()` при запуске приложения не используется. Образ PostgreSQL должен содержать pgvector (`pgvector/pgvector:pg17`). Размерность вектора — константа `EMBEDDING_DIM` в `app/infrastructure/db/base.py`; её значение подтверждается выбором embedding-модели. [Alembic autogenerate](https://alembic.sqlalchemy.org/en/latest/autogenerate.html).
 
 ### 8.4. Авторизация и изоляция организаций
 
@@ -545,7 +606,7 @@ Portal и webhook используют один AdmissionService после св
 
 | Этап | Правило |
 |---|---|
-| Перед отправкой и выполнением | Relay, bridge и worker снова проверяют подписку, отмену и резерв |
+| Перед отправкой и выполнением | Relay и worker снова проверяют подписку, отмену и резерв |
 | Перед каждым платным вызовом | Создать TokenUsage и занять верхнюю границу `U`, только если `remaining − inflight >= U` |
 | Получен фактический расход `A ≤ U` | Один раз списать A, уменьшить резерв на A, снять занятость U; остаток U доступен этому же заданию |
 | Задание завершено или отменено | Вернуть `remaining − inflight`; уже потраченное не возвращать |
@@ -633,25 +694,25 @@ Publish worker отправляет несколько inline-комментар
 
 403 без признаков rate limit требует проверки прав, 404 — доступа и существования объекта, 422 — координат, payload или ограничения спама. Эти ошибки не лечатся одинаковым retry. Новый commit отменяет устаревшую публикацию; текст уже рассчитанных замечаний при повторе не генерируется заново.
 
-### 8.8. RabbitMQ → BullMQ → worker
+### 8.8. RabbitMQ → worker
 
-RabbitMQ содержит direct exchange `backend.jobs.v1`, три durable очереди `review`, `index`, `publish` и DLQ. Routing keys: `review.requested`, `index.requested`, `publish.requested`. Bridge переносит события в одноимённые очереди BullMQ в Redis. Для HA RabbitMQ выбираются quorum queues; версии клиентов и настройки закрепляются в deploy-конфигурации.
+RabbitMQ содержит direct exchange `backend.jobs.v1`, три durable очереди `review`, `index`, `publish` и DLQ. Routing keys: `review.requested`, `index.requested`, `publish.requested`. Для HA выбираются quorum queues; версии клиентов (в Python — `aio-pika`) и настройки закрепляются в deploy-конфигурации.
 
 Сообщение содержит `schema_version`, `event_id`, `organization_id`, `event_type`, `aggregate_id`, `dispatch_generation` и trace context. Diff, prompt, секреты и баланс остаются в БД.
 
 1. Relay отправляет persistent message в RabbitMQ, проверяет маршрутизацию и ждёт publisher confirm. После этого отмечает outbox.
-2. Bridge проверяет задание и допуск, вызывает `Queue.add` с `jobId=event_id`. RabbitMQ получает manual ACK только после успешного добавления или подтверждения уже существующего задания. Отменённая работа подтверждается после проверки её конечного состояния в БД.
-3. BullMQ запускает обработчик свободного worker. Worker получает аренду в PostgreSQL, выполняет работу и сохраняет результат до завершения обработчика.
+2. Worker — consumer с `prefetch=1` и ручным ACK. Он проверяет задание и допуск в БД, получает аренду, выполняет работу и сохраняет результат.
+3. ACK отправляется после сохранения состояния этапа. Отменённая или устаревшая работа подтверждается после проверки её конечного состояния в БД.
 
-Confirm подтверждает приём RabbitMQ, ACK — передачу в BullMQ. Он не означает завершение ревью. Bridge использует ограниченный prefetch; длительное ревью не удерживает AMQP-сообщение. [RabbitMQ: confirms и acknowledgements](https://www.rabbitmq.com/docs/confirms).
+Confirm подтверждает приём брокером, ACK — что состояние обработки сохранено. Пока ревью идёт, сообщение остаётся неподтверждённым, поэтому `consumer_timeout` RabbitMQ задаётся выше максимального времени этапа, а работа делится на части с сохранением прогресса. [RabbitMQ: confirms и acknowledgements](https://www.rabbitmq.com/docs/confirms).
 
-Повторы бизнес-операций остаются под контролем приложения: `next_attempt_at` и будущий outbox записываются вместе с состоянием job, dispatch отправляет их в нужный момент. BullMQ настроен на одну прикладную попытку; восстановление stalled jobs всё равно может повторно вызвать обработчик. Проверка состояния и поколения в БД предотвращает повторный эффект. Нечитаемые AMQP-сообщения уходят в DLQ с оповещением.
+Повторы бизнес-операций остаются под контролем приложения: `next_attempt_at` и будущий outbox записываются вместе с состоянием job, dispatch отправляет их в нужный момент. Разрыв соединения или падение worker возвращает неподтверждённое сообщение в очередь — повторная доставка допустима, а проверка состояния и поколения в БД предотвращает повторный эффект. Нечитаемые сообщения уходят в DLQ с оповещением.
 
-При сбое Redis bridge не подтверждает непереданную работу и приостанавливает приём до восстановления связи. Если задание потеряно уже после ACK, recovery восстановит его из PostgreSQL. Удаление истории BullMQ не удаляет защиту от повторов в БД. Для обработки заданы пределы времени, а CPU-затратные этапы не блокируют продление блокировки BullMQ.
+При недоступности RabbitMQ события остаются в outbox и уходят после восстановления; уже запущенная работа продолжается, а ACK выполняется после переподключения. Если сообщение потеряно (например, очередь пересоздана), recovery восстановит его из PostgreSQL. CPU-затратные этапы не блокируют event loop consumer, поэтому heartbeat соединения не прерывается.
 
 ### 8.9. Логи, метрики и трассировка
 
-Приложения пишут JSON-логи в stdout/stderr. В Compose они доступны через `docker compose logs`; драйвер логирования ограничивает размер и число файлов. В Kubernetes сборщик на узлах отправляет их в единое хранилище. Backend не пишет собственные бесконечно растущие файлы логов.
+Приложения пишут JSON-логи в stdout/stderr. В Compose они доступны через `docker compose logs`; драйвер логирования ограничивает размер и число файлов. Сборщик логов отправляет их в единое хранилище. Backend не пишет собственные бесконечно растущие файлы логов.
 
 Общие поля: UTC-время, `level`, `service`, `version`, `event`, `request_id`, `trace_id`, `job_id`, `event_id`, этап, номер попытки, длительность и код ошибки. При наличии добавляются ID организации/репозитория. INFO — приём и смена этапа, WARNING — отложенный повтор или отказ допуска, ERROR — окончательный сбой/нарушение данных. Обычные успешные probes не засоряют INFO.
 
@@ -659,7 +720,7 @@ Confirm подтверждает приём RabbitMQ, ACK — передачу �
 
 Секреты, Authorization, webhook-подписи, полный diff, prompt и ответы модели не логируются. Ошибки провайдера очищаются перед записью. Доступ к логам ограничен; срок хранения задаётся отдельно от истории ревью.
 
-Метрики: задержка HTTP, возраст outbox, ожидание RabbitMQ/BullMQ, задержка bridge, stalled jobs, время этапов, повторы, истёкшие аренды, расход/резервы токенов, `unknown` usage/publications, задержка RAG и cooldown провайдеров. ID job/организации остаются в логах, а не в labels метрик, чтобы не создавать миллионы временных рядов.
+Метрики: задержка HTTP, возраст outbox, глубина и ожидание очередей RabbitMQ, повторные доставки, время этапов, повторы, истёкшие аренды, расход/резервы токенов, `unknown` usage/publications, задержка RAG и cooldown провайдеров. ID job/организации остаются в логах, а не в labels метрик, чтобы не создавать миллионы временных рядов.
 
 OpenTelemetry связывает HTTP, outbox, consumer и внешние вызовы через trace context. ID трассы помогает расследованию, но не авторизации. [OpenTelemetry: context propagation](https://opentelemetry.io/docs/concepts/context-propagation/).
 
@@ -675,17 +736,16 @@ PostgreSQL резервируется вместе с RAG и журналом д
 
 ## 9. Архитектурные решения
 
-### 9.1. RabbitMQ и BullMQ: разделение обязанностей
+### 9.1. RabbitMQ как единственный брокер
 
 | Компонент | Обязанность |
 |---|---|
-| RabbitMQ | Приём и маршрутизация событий о разрешённой работе |
-| Bridge внутри dispatch | Передача события RabbitMQ в задание BullMQ с устойчивым ID |
-| BullMQ | Запуск обработчиков в workers, параллелизм, блокировки и состояния выполнения |
-| Redis | Хранение очередей и служебного состояния BullMQ |
-| Compose / Kubernetes | Запуск, количество и перезапуск процессов workers |
+| RabbitMQ | Маршрутизация событий о разрешённой работе и доставка в workers, DLQ |
+| Dispatch | Outbox → RabbitMQ, повторы и восстановление |
+| Workers | Consumers с `prefetch=1`; параллелизм задаёт число процессов |
+| Docker Compose | Запуск, количество и перезапуск процессов workers |
 
-Оба компонента входят в выбранную архитектуру. BullMQ запускает выполнение задания через обработчик Worker; число процессов задаёт среда развёртывания. Состояние бизнес-операции и бюджет остаются в PostgreSQL. [BullMQ: workers](https://docs.bullmq.io/guide/workers).
+Два брокера (RabbitMQ и BullMQ с Redis) отклонены: они добавляли промежуточный bridge, ещё одно хранилище и второй набор состояний выполнения при том, что устойчивое состояние и так живёт в PostgreSQL. RabbitMQ даёт нужное: durable очереди, publisher confirms, ручной ACK, DLQ и ограничение prefetch. Состояние бизнес-операции и бюджет остаются в PostgreSQL.
 
 ### 9.2. Остальные решения
 
@@ -695,7 +755,7 @@ PostgreSQL резервируется вместе с RAG и журналом д
 | Один проект, несколько процессов | Общая логика при раздельном масштабировании API, анализа и публикации |
 | SQLAlchemy 2.x + Alembic | Явный контроль схемы и миграций; SQLModel не упрощает нужные составные связи и политики |
 | Отдельный publisher | Лимиты и повторы GitHub не мешают анализу и не повторяют расход LLM |
-| Outbox и допустимая повторная доставка | Работа переживает сбой между PostgreSQL, RabbitMQ, BullMQ и worker |
+| Outbox и допустимая повторная доставка | Работа переживает сбой между PostgreSQL, RabbitMQ и worker |
 | Версии кода, prompt и RAG | Результат объясним; повтор не меняет вход незаметно |
 | Общий допуск после раздельной авторизации | Portal и webhook расходуют один бюджет по одинаковым правилам |
 
@@ -733,27 +793,27 @@ PostgreSQL резервируется вместе с RAG и журналом д
 | S-14 | PostgreSQL недоступна до commit webhook | 503, событие не подтверждено; redelivery/сверка после восстановления. Автоматический повтор GitHub не предполагается |
 | S-15 | RabbitMQ недоступен после commit webhook | Webhook принят, outbox ждёт; после восстановления одно задание доходит до worker |
 | S-16 | Dispatch упал после confirm, до отметки outbox | Повтор сообщения допустим, повторный бизнес-эффект отсутствует |
-| S-17 | Worker упал после сохранения результата, до completed в BullMQ | Повторный обработчик видит завершённое состояние в БД и не вызывает LLM заново |
+| S-17 | Worker упал после сохранения результата, до ACK RabbitMQ | Сообщение доставлено повторно; обработчик видит завершённое состояние в БД и не вызывает LLM заново |
 | S-18 | Worker исчез; старый процесс позже вернулся | Аренда истекла, recovery выдал новое поколение; запись от старого поколения отклонена |
 | S-19 | Ответ LLM потерян / usage пришёл дважды | Unknown удерживает U до сверки; поздний или повторный usage учитывается один раз, TTL не возвращает его автоматически |
 | S-20 | GitHub сохранил комментарии, ответ POST потерян | Publication unknown; поиск находит внешний результат и связывает ID без слепого повторного POST |
 | S-21 | GitHub вернул 429/403 rate limit, запрет прав или 422 | Rate limit даёт cooldown; ошибка прав/координат получает отдельную причину и не крутится в одинаковом retry |
 | S-22 | Индексатор упал посередине / завершился старый индекс | Частичная версия не видна; старый результат не меняет указатель нового snapshot |
 | S-23 | Сообщение повреждено / попытки исчерпаны | Повреждённое сообщение в DLQ с alert; известное задание failed, дальнейший запуск — явное решение |
-| S-24 | Задания Redis потеряны после ACK RabbitMQ | Recovery возвращает отсутствующие незавершённые задания из БД; существующие waiting/delayed и завершённые не дублирует |
+| S-24 | Сообщение потеряно в RabbitMQ (очередь пересоздана) | Recovery возвращает отсутствующие незавершённые задания из БД через outbox; завершённые не дублирует |
 
 ### 10.4. Эксплуатация
 
 | ID | Проверка | Ожидаемый результат |
 |---|---|---|
 | S-25 | Отключить БД при работающем приложении | Readiness false, liveness true; нет каскада перезапусков; worker прекращает брать работу |
-| S-26 | Отключить RabbitMQ | Webhook остаётся ready при доступной БД, dispatch not ready; workers продолжают уже переданные в BullMQ задания |
+| S-26 | Отключить RabbitMQ | Webhook остаётся ready при доступной БД, dispatch not ready; события копятся в outbox, после восстановления доходят до workers |
 | S-27 | Зависание основного цикла / медленный локальный старт | Liveness обнаруживает зависание; startup даёт настроенное окно и защищает от ранних перезапусков |
 | S-28 | SIGTERM и rolling update workers | Приём остановлен, сохранённый этап восстановим; maxSurge не добавляет пятый экземпляр; нет двойного списания |
 | S-29 | Пройти одно ревью и один отказ | Этапы находятся по trace/job ID; секретов и исходного кода в логах нет; нужное оповещение срабатывает |
 | S-30 | Миграция пустой БД и восстановление backup | Схема соответствует ORM, RLS работает, core/rag согласованы, незавершённая работа восстановима |
-| S-31 | Bridge упал после Queue.add, до ACK RabbitMQ | Повтор доставки использует тот же event/job ID; завершённая работа и резерв не создаются заново |
-| S-32 | Отключить Redis до Queue.add | Bridge не отправляет ACK, dispatch/workers not ready; после восстановления передача возобновляется без нового резерва |
+| S-31 | Соединение worker с RabbitMQ разорвано во время ревью | Сообщение вернулось в очередь; повторный consumer уважает аренду и поколение, резерв и LLM-вызовы не дублируются |
+| S-32 | Нет publisher confirm после отправки dispatch | Outbox не отмечается отправленным; повтор использует тот же event ID, новый резерв не создаётся |
 
 ## 11. Риски и открытые вопросы
 
@@ -764,9 +824,10 @@ PostgreSQL резервируется вместе с RAG и журналом д
 | Лимиты GitHub и неизвестный POST | Проверить сверку на тестовой интеграции; дубли внешних эффектов полностью исключить нельзя |
 | RAG нагружает общую БД | Измерить объём и задержки, ограничить batches, workers и pools |
 | Качество LLM и Tree-sitter | Поддерживаемые языки и правила проверить на наборе типичных репозиториев |
-| Связка RabbitMQ → BullMQ | Проверить сбой между Queue.add и ACK, потерю Redis, stalled jobs и совместимость Python-клиента; не дублировать циклы retry |
+| RabbitMQ как единственный брокер | Проверить `consumer_timeout` для долгих ревью, повторную доставку после разрыва, DLQ и совместимость `aio-pika`; не дублировать циклы retry |
 | Пропущенный webhook до записи в БД | Настроить redelivery и сверку пропусков. [GitHub failed deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries) |
-| SLA, хранение и production-инфраструктура | После пилота выбрать пороги alerts, сроки очистки, хранилище логов и HA для PostgreSQL/RabbitMQ/Redis |
+| Kubernetes | Выяснить, есть ли готовый кластер и нужен ли он после пилота; на старте достаточно Docker Compose |
+| SLA, хранение и production-инфраструктура | После пилота выбрать пороги alerts, сроки очистки, хранилище логов и HA для PostgreSQL/RabbitMQ |
 
 Отдельные vector/graph DB, выполнение пользовательских скриптов и автоматическое изменение кода отложены. Frontend-архитектура в этот документ не входит.
 
@@ -776,8 +837,8 @@ PostgreSQL резервируется вместе с RAG и журналом д
 |---|---|
 | Admission | Разрешение задания после проверки доступа, подписки и резерва |
 | Outbox | Запись в БД о сообщении, которое нужно отправить в очередь |
-| ACK / publisher confirm | Подтверждение bridge о передаче в BullMQ / приёма сообщения RabbitMQ |
-| BullMQ Worker | Объект в процессе worker, который получает задания и запускает обработчик |
+| ACK / publisher confirm | Подтверждение worker, что состояние сохранено / приём сообщения брокером RabbitMQ |
+| Consumer | Часть процесса worker, которая получает сообщения RabbitMQ (`prefetch=1`) и запускает обработчик |
 | Аренда и поколение | Временное право worker изменять задание; старое поколение больше не принимается |
 | Finding / Comment | Замечание анализа / запись о его доставке в GitHub |
 | Publication | Сохранённый пакет отправки комментариев |
