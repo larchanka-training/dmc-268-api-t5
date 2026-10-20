@@ -19,7 +19,8 @@ def to_async_url(url: str) -> str:
 
 def create_engine(url: str | None = None) -> AsyncEngine:
     return create_async_engine(
-        to_async_url(url or get_settings().database_url), pool_pre_ping=True
+        to_async_url(url or get_settings().database_url.get_secret_value()),
+        pool_pre_ping=True,
     )
 
 
