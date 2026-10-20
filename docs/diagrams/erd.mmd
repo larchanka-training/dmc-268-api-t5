@@ -1,0 +1,223 @@
+erDiagram
+    Organization ||--o{ GitHubInstallation : owns
+    Organization ||--o| Subscription : subscribes
+    Subscription ||--o{ TokenBudget : allocates
+    TokenBudget ||--o{ TokenReservation : reserves
+    ReviewJob o|--o{ TokenReservation : review_budget
+    RepositorySnapshot o|--o{ TokenReservation : index_budget
+    TokenReservation ||--o{ TokenUsage : accounts
+    GitHubInstallation ||--o{ Repository : enables
+    Repository ||--o{ MergeRequest : contains
+    MergeRequest ||--o{ ReviewJob : reviewed_by
+    ReviewJob ||--o{ ContextPayload : uses
+    ReviewJob ||--o{ Finding : produces
+    ContextPayload o|--o{ Finding : supports
+    ReviewJob ||--o{ Publication : publishes
+    Publication ||--o{ Comment : contains
+    Finding ||--o| Comment : delivered_as
+    Repository ||--o{ RepositorySnapshot : indexed_as
+    Repository o|--o| RepositorySnapshot : active_snapshot
+    RepositorySnapshot ||--o{ CodeChunk : contains
+    RepositorySnapshot ||--o{ CodeEdge : contains
+    CodeChunk ||--o{ CodeEdge : source
+    CodeChunk o|--o{ CodeEdge : resolved_target
+    Organization ||--o{ WebhookReceipt : receives
+    Organization ||--o{ OutboxEvent : dispatches
+
+    Organization {
+        uuid id PK
+        text name
+        text identity_subject UK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    Subscription {
+        uuid id PK
+        uuid organization_id FK, UK
+        text status
+        text plan_version
+        jsonb allowed_operations
+        timestamptz valid_until
+        timestamptz checked_at
+    }
+    TokenBudget {
+        uuid id PK
+        uuid organization_id FK
+        uuid subscription_id FK
+        timestamptz period_start
+        timestamptz period_end
+        bigint allowance_tokens
+        bigint consumed_tokens
+        bigint reserved_tokens
+    }
+    TokenReservation {
+        uuid id PK
+        uuid organization_id FK
+        uuid budget_id FK
+        uuid review_job_id FK "nullable"
+        uuid snapshot_id FK "nullable"
+        text admission_key UK
+        text status
+        bigint granted_tokens
+        bigint consumed_tokens
+        bigint released_tokens
+        bigint remaining_tokens
+        bigint inflight_tokens
+    }
+    TokenUsage {
+        uuid id PK
+        uuid organization_id FK
+        uuid reservation_id FK
+        text request_key UK
+        text request_hash
+        text provider_request_id
+        bigint upper_bound_tokens
+        bigint actual_tokens
+        text status
+    }
+    GitHubInstallation {
+        uuid id PK
+        uuid organization_id FK
+        bigint installation_id UK
+        text account_login
+        text status
+    }
+    Repository {
+        uuid id PK
+        uuid organization_id FK
+        uuid installation_id FK
+        uuid active_snapshot_id FK "nullable"
+        bigint github_repository_id UK
+        text full_name
+        text default_branch
+        boolean is_enabled
+    }
+    MergeRequest {
+        uuid id PK
+        uuid organization_id FK
+        uuid repository_id FK
+        bigint number UK
+        text title
+        text state
+        text base_sha
+        text head_sha
+    }
+    ReviewJob {
+        uuid id PK
+        uuid organization_id FK
+        uuid merge_request_id FK
+        text run_key UK
+        text head_sha
+        text base_sha
+        text status
+        text pipeline_version
+        text prompt_version
+        text config_hash
+        jsonb config
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
+        int dispatch_generation
+    }
+    ContextPayload {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        int part_no UK
+        jsonb payload
+        text payload_hash
+        text model
+        jsonb params
+        timestamptz expires_at
+    }
+    Finding {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        uuid context_payload_id FK "nullable"
+        text fingerprint UK
+        text path
+        text side
+        int start_line
+        int end_line
+        text category
+        text severity
+        text body
+        text suggestion
+    }
+    Publication {
+        uuid id PK
+        uuid organization_id FK
+        uuid review_job_id FK
+        int batch_no UK
+        text status
+        jsonb payload
+        bigint github_review_id
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
+    }
+    Comment {
+        uuid id PK
+        uuid organization_id FK
+        uuid publication_id FK
+        uuid finding_id FK, UK
+        bigint github_comment_id
+        text status
+    }
+    RepositorySnapshot {
+        uuid id PK
+        uuid organization_id FK
+        uuid repository_id FK
+        text commit_sha UK
+        text profile_hash UK
+        text embedding_model
+        int embedding_dim
+        text status
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz lease_expires_at
+        int lease_generation
+    }
+    CodeChunk {
+        uuid id PK
+        uuid organization_id FK
+        uuid snapshot_id FK
+        text path
+        int start_line
+        int end_line
+        text symbol
+        text content
+        vector embedding
+    }
+    CodeEdge {
+        uuid id PK
+        uuid organization_id FK
+        uuid snapshot_id FK
+        uuid source_chunk_id FK
+        uuid target_chunk_id FK "nullable"
+        text edge_type
+        text target_name
+    }
+    WebhookReceipt {
+        uuid id PK
+        uuid organization_id FK
+        text delivery_id UK
+        text event_type
+        text event_hash
+        text outcome
+        text reject_reason
+    }
+    OutboxEvent {
+        uuid id PK
+        uuid organization_id FK
+        text event_type
+        text aggregate_type
+        uuid aggregate_id
+        int dispatch_generation
+        timestamptz available_at
+        timestamptz published_at
+        int attempts
+    }

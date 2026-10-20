@@ -12,6 +12,18 @@ curl http://localhost:8000/healthcheck   # {"status":"ok"}
 Compose starts the API, PostgreSQL 17 and Redis 7. Optional overrides
 (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) go into a local `.env`.
 
+## Architecture and database
+
+- [docs/BACKEND_ARCHITECTURE.md](docs/BACKEND_ARCHITECTURE.md) — backend architecture (Router → Service → Repository → LLM Gateway), ER model, ORM and migrations.
+- [docs/diagrams/erd.mmd](docs/diagrams/erd.mmd) — ER diagram (Mermaid).
+- Models: `app/infrastructure/db/models/`. Migrations: `alembic/versions/`.
+
+```bash
+docker compose up -d --wait db
+poetry run alembic upgrade head
+poetry run alembic check   # models match the schema
+```
+
 ## Local development (Poetry, Python 3.13)
 
 ```bash
